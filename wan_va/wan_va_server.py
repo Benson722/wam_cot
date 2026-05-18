@@ -440,6 +440,35 @@ class VA_Server:
         os.makedirs(self.exp_save_root, exist_ok=True)
         torch.cuda.empty_cache()
 
+    def _switch_prompt(self, prompt=None):
+        """WAM-CoT soft prompt-switch.
+
+        Re-encodes ONLY the language condition (`self.prompt_embeds` /
+        `self.negative_prompt_embeds`) to a new sub-task instruction emitted by
+        the high-level VLM planner (Route-1 Semantic CoT). Crucially this does
+        NOT clear the transformer KV cache, the streaming VAE state, or
+        `self.frame_st_id`: the autoregressive world-model context built up so
+        far is preserved, so sub-tasks compose into one continuous rollout
+        instead of restarting. This is the only behavioural difference from a
+        full `_reset` and is what the `--ablation hard_reset` flag toggles off.
+        """
+        logger.info(f'Switch sub-task prompt -> {prompt}')
+        if prompt is None:
+            logger.info('switch_prompt called with prompt=None; keeping current embeds.')
+            return
+        self.prompt_embeds, self.negative_prompt_embeds = self.encode_prompt(
+            prompt=prompt,
+            negative_prompt=None,
+            do_classifier_free_guidance=self.job_config.guidance_scale > 1,
+            num_videos_per_prompt=1,
+            prompt_embeds=None,
+            negative_prompt_embeds=None,
+            max_sequence_length=512,
+            device=self.device,
+            dtype=self.dtype,
+        )
+        torch.cuda.empty_cache()
+
     def _infer(self, obs, frame_st_id=0):
         frame_chunk_size = self.job_config.frame_chunk_size
         if frame_st_id == 0:
@@ -608,10 +637,20 @@ class VA_Server:
         reset = obs.get('reset', False)
         prompt = obs.get('prompt', None)
         compute_kv_cache = obs.get('compute_kv_cache', False)
+        switch_prompt = obs.get('switch_prompt', False)
 
         if reset:
             logger.info(f"******************* Reset server ******************")
             self._reset(prompt=prompt)
+            return dict()
+        elif switch_prompt:
+            # WAM-CoT (Route-1, Semantic CoT) soft prompt-switch: the high-level
+            # VLM planner advances to the next sub-task instruction. We re-encode
+            # the language condition WITHOUT clearing the transformer KV cache,
+            # streaming-VAE state, or frame_st_id, so the world-model's temporal
+            # context carries over across sub-task boundaries.
+            logger.info(f"************* Switch sub-task prompt *************")
+            self._switch_prompt(prompt=prompt)
             return dict()
         elif compute_kv_cache:
             logger.info(

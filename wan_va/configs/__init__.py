@@ -10,8 +10,10 @@ from .va_demo_i2va import va_demo_i2va_cfg
 from .va_libero_cfg import va_libero_cfg
 from .va_libero_train_cfg import va_libero_train_cfg
 from .va_libero_i2va import va_libero_i2va_cfg
+from .va_robocasa_cfg import va_robocasa_cfg
 
 VA_CONFIGS = {
+    'robocasa': va_robocasa_cfg,
     'robotwin': va_robotwin_cfg,
     'franka': va_franka_cfg,
     'robotwin_i2av': va_robotwin_i2va_cfg,
