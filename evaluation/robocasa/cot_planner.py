@@ -39,7 +39,7 @@ import numpy as np
 # default below is not what your account exposes. An environment variable, if
 # set, still takes precedence over these (handy for one-off overrides).
 # ===========================================================================
-HARDCODED_DEEPSEEK_API_KEY = "sk-REPLACE_WITH_YOUR_DEEPSEEK_KEY"
+HARDCODED_DEEPSEEK_API_KEY = "sk-bf71c76a9b5a4baf82ea78759ba2a0fa"
 HARDCODED_DEEPSEEK_MODEL = "deepseek-v4-pro"
 HARDCODED_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
