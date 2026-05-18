@@ -26,7 +26,7 @@ Ablations (PDF 消融实验 · 必做) via --ablation:
 Run (internet-capable 4090, server already up):
   export DEEPSEEK_API_KEY=sk-...
   python evaluation/robocasa/client_cot.py \
-     --tasks PnPCounterToCab --port 29056 --test-num 25 \
+     --tasks PickPlaceCounterToCabinet --port 29056 --test-num 25 \
      --ablation none --out-dir outputs/robocasa/cot
 """
 from __future__ import annotations

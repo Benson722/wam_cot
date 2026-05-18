@@ -42,7 +42,7 @@ class RobocasaConfig:
     tells you which (if any) need overriding for your robosuite version."""
 
     # --- task / robot -----------------------------------------------------
-    env_name: str = "PnPCounterToCab"
+    env_name: str = "PickPlaceCounterToCabinet"
     robots: str = "PandaOmron"
     # Controller: None -> let helper pick the Robocasa default composite
     # controller ("BASIC"). Override with a robosuite controller name/json.
@@ -457,12 +457,23 @@ class RobocasaEnv:
             pass
 
 
-# Curated default task set (representative long-horizon / occlusion-prone
-# Robocasa atomic tasks). Override via the client's --tasks flag with names
-# from `python -m robocasa.demos.demo_tasks`.
+# Curated default task set (representative occlusion-prone Robocasa atomic
+# tasks). Names verified against the robosuite 1.5.2 / robocasa 1.0.1 registry
+# on the server (see probe output). Override via the client's --tasks flag
+# with any name from `python -m robocasa.demos.demo_tasks`. For long-horizon
+# demonstrations of CoT, use composite tasks e.g. ArrangeVegetables,
+# PrepareCoffee, MakeFruitBowl, OrganizeVegetables.
 DEFAULT_TASKS: Tuple[str, ...] = (
-    "PnPCounterToCab",       # occlusion: object goes inside a cabinet
-    "PnPCounterToMicrowave", # occlusion + articulated appliance
-    "OpenDrawer",            # articulated, prerequisite-style
-    "PnPCounterToSink",      # long reach, container
+    "PickPlaceCounterToCabinet",    # occlusion: object goes inside a cabinet
+    "PickPlaceCounterToMicrowave",  # occlusion + articulated appliance
+    "OpenDrawer",                   # articulated, prerequisite-style
+    "PickPlaceCounterToSink",       # long reach, container
+)
+
+# Known-good env names tried by probe_env.py if the requested one is absent.
+PROBE_FALLBACK_ENVS: Tuple[str, ...] = (
+    "PickPlaceCounterToCabinet",
+    "PickPlaceCounterToMicrowave",
+    "OpenDrawer",
+    "OpenCabinet",
 )

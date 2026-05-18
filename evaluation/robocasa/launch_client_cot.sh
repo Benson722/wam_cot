@@ -12,7 +12,7 @@ PORT=${PORT:-29056}
 TEST_NUM=${TEST_NUM:-25}
 OUT_DIR=${OUT_DIR:-outputs/robocasa/cot}
 ABLATION=${ABLATION:-none}
-TASKS=${TASKS:-"PnPCounterToCab PnPCounterToMicrowave OpenDrawer"}
+TASKS=${TASKS:-"PickPlaceCounterToCabinet PickPlaceCounterToMicrowave OpenDrawer"}
 ENV_OVERRIDES=${ENV_OVERRIDES:-}
 
 ARGS=(--tasks $TASKS --port "$PORT" --test-num "$TEST_NUM"

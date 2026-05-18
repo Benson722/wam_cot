@@ -7,7 +7,7 @@ set -e
 # DeepSeek creds are hardcoded in evaluation/robocasa/cot_planner.py.
 PORT=${PORT:-29056}
 TEST_NUM=${TEST_NUM:-25}
-TASKS=${TASKS:-"PnPCounterToCab PnPCounterToMicrowave OpenDrawer"}
+TASKS=${TASKS:-"PickPlaceCounterToCabinet PickPlaceCounterToMicrowave OpenDrawer"}
 ROOT=${ROOT:-outputs/robocasa}
 ENV_OVERRIDES=${ENV_OVERRIDES:-}
 

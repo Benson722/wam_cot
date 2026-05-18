@@ -94,7 +94,7 @@ Run from the **server repo root** (script-path form, cwd-independent):
 ```bash
 conda activate robocasa
 cd $LINGBOT
-python evaluation/robocasa/probe_env.py --env PnPCounterToCab \
+python evaluation/robocasa/probe_env.py --env PickPlaceCounterToCabinet \
        --save-frames --out outputs/robocasa_probe.json
 ```
 
@@ -129,7 +129,9 @@ bash evaluation/robocasa/run_ablations.sh
 
 Pick tasks from `python -m robocasa.demos.demo_tasks`; set via
 `TASKS="EnvA EnvB"`. Defaults target long-horizon / occlusion-prone tasks
-(`PnPCounterToCab`, `PnPCounterToMicrowave`, `OpenDrawer`, `PnPCounterToSink`).
+(`PickPlaceCounterToCabinet`, `PickPlaceCounterToMicrowave`, `OpenDrawer`,
+`PickPlaceCounterToSink`). For long-horizon CoT demos use composite tasks
+e.g. `ArrangeVegetables`, `PrepareCoffee`, `MakeFruitBowl`.
 
 ## 5. Ablations (PDF 消融实验 · 必做)
 

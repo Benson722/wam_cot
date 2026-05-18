@@ -8,7 +8,7 @@ control group the WAM-CoT (Route-1) client is compared against.
 
 Run (on the internet-capable 4090, after launching the server):
     python evaluation/robocasa/client.py \
-        --tasks PnPCounterToCab PnPCounterToMicrowave \
+        --tasks PickPlaceCounterToCabinet PickPlaceCounterToMicrowave \
         --port 29056 --test-num 25 --out-dir outputs/robocasa/baseline
 """
 from __future__ import annotations

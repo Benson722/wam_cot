@@ -14,7 +14,7 @@ defaults target PandaOmron + recent robosuite but the install may differ.
 Usage:
     conda activate robocasa
     cd /inspire/qb-ilm2/project/26summer-camp-11/public/group3/robocasa_suite/robocasa
-    python -m evaluation.robocasa.probe_env --env PnPCounterToCab \
+    python evaluation/robocasa/probe_env.py --env PickPlaceCounterToCabinet \
         --out outputs/robocasa_probe.json
     # (or run from the lingbot repo with PYTHONPATH including it)
 """
@@ -50,7 +50,9 @@ def _jsonable(x: Any):
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--env", default="PnPCounterToCab", help="Robocasa env name")
+    ap.add_argument("--env", default="PickPlaceCounterToCabinet",
+                    help="Robocasa env name (robocasa 1.0.1 uses PickPlace* "
+                    "names; falls back to known-good names if absent)")
     ap.add_argument("--robots", default="PandaOmron")
     ap.add_argument("--controller", default=None)
     ap.add_argument("--height", type=int, default=256)
@@ -96,9 +98,15 @@ def main() -> None:
     report["controller_api"] = ctrl_api
     report["controller_config"] = _jsonable(ctrl_cfg)
 
-    # --- make env (resilient to unknown kwargs) ---------------------------
+    # --- make env (resilient to unknown kwargs + wrong env name) ----------
+    try:
+        from evaluation.robocasa.robocasa_env import PROBE_FALLBACK_ENVS
+    except Exception:
+        PROBE_FALLBACK_ENVS = (
+            "PickPlaceCounterToCabinet", "PickPlaceCounterToMicrowave",
+            "OpenDrawer", "OpenCabinet",
+        )
     base_kwargs = dict(
-        env_name=args.env,
         robots=args.robots,
         controller_configs=ctrl_cfg,
         has_renderer=False,
@@ -117,16 +125,28 @@ def main() -> None:
             "robot0_frontview",
         ],
     )
+    # Try the requested env first, then known-good fallbacks (robocasa 1.0.1
+    # uses PickPlace* names, not PnP*), so a wrong name doesn't waste a round.
+    candidates = [args.env] + [e for e in PROBE_FALLBACK_ENVS if e != args.env]
     env = None
     last_err = None
-    for drop in ([], ["use_object_obs"], ["ignore_done", "use_object_obs"]):
-        kw = {k: v for k, v in base_kwargs.items() if k not in drop}
-        try:
-            env = robosuite.make(**kw)
-            report["make_kwargs_used"] = sorted(kw.keys())
+    report["env_candidates_tried"] = []
+    for env_name in candidates:
+        report["env_candidates_tried"].append(env_name)
+        for drop in ([], ["use_object_obs"], ["ignore_done", "use_object_obs"]):
+            kw = {k: v for k, v in base_kwargs.items() if k not in drop}
+            kw["env_name"] = env_name
+            try:
+                env = robosuite.make(**kw)
+                report["env_name"] = env_name
+                report["env_name_used"] = env_name
+                report["requested_env"] = args.env
+                report["make_kwargs_used"] = sorted(kw.keys())
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = f"{env_name}: {e}"
+        if env is not None:
             break
-        except Exception as e:  # noqa: BLE001
-            last_err = f"{e}"
     if env is None:
         report["make_error"] = f"{last_err}\n{traceback.format_exc()}"
         _dump(report, args.out)
