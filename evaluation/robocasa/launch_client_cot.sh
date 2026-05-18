@@ -3,9 +3,10 @@
 # Run in the *robocasa* conda env on the internet-capable 4090 (DeepSeek API).
 set -e
 
-: "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY (the planner needs it)}"
-export DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-v4-pro}
-export DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
+# DeepSeek creds are hardcoded in evaluation/robocasa/cot_planner.py
+# (HARDCODED_DEEPSEEK_*). No `export` needed. Env vars, if set, still win.
+DEEPSEEK_MODEL=${DEEPSEEK_MODEL:-deepseek-v4-pro}
+DEEPSEEK_BASE_URL=${DEEPSEEK_BASE_URL:-https://api.deepseek.com}
 
 PORT=${PORT:-29056}
 TEST_NUM=${TEST_NUM:-25}

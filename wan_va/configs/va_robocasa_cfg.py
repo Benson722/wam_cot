@@ -26,7 +26,7 @@ va_shared_cfg.infer_mode = 'server'
 #       lingbot-va-storage/checkpoints/lingbot-va-posttrain-libero-long
 # Remember to set transformer/config.json -> "attn_mode": "torch" for inference.
 # ---------------------------------------------------------------------------
-va_robocasa_cfg.wan22_pretrained_model_name_or_path = "/path/to/lingbot-va-posttrain-libero-long"
+va_robocasa_cfg.wan22_pretrained_model_name_or_path = "/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/checkpoints/lingbot-va-posttrain-libero-long"
 
 # --- Model-facing interface: keep identical to LIBERO ----------------------
 va_robocasa_cfg.attn_window = 30

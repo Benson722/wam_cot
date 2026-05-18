@@ -31,14 +31,31 @@ from typing import Dict, List, Optional
 import numpy as np
 
 
+# ===========================================================================
+# >>> HARDCODED DEEPSEEK CREDENTIALS — EDIT THESE ONCE, NO `export` NEEDED <<<
+#
+# Paste your real DeepSeek API key on the next line (keep the quotes). The
+# exact "v4 pro" API model id is endpoint-specific — change it here if the
+# default below is not what your account exposes. An environment variable, if
+# set, still takes precedence over these (handy for one-off overrides).
+# ===========================================================================
+HARDCODED_DEEPSEEK_API_KEY = "sk-REPLACE_WITH_YOUR_DEEPSEEK_KEY"
+HARDCODED_DEEPSEEK_MODEL = "deepseek-v4-pro"
+HARDCODED_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+
+
+def _cred(env_name: str, hardcoded: str) -> str:
+    """env var wins if non-empty, else the hardcoded constant above."""
+    v = os.environ.get(env_name, "").strip()
+    return v if v else hardcoded
+
+
 # ---------------------------------------------------------------------------
 @dataclasses.dataclass
 class PlannerConfig:
-    base_url: str = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
-    api_key: str = os.environ.get("DEEPSEEK_API_KEY", "")
-    # User uses "deepseek v4 pro". The exact API model id is endpoint-specific;
-    # override with --vlm-model / DEEPSEEK_MODEL.
-    model: str = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro")
+    base_url: str = _cred("DEEPSEEK_BASE_URL", HARDCODED_DEEPSEEK_BASE_URL)
+    api_key: str = _cred("DEEPSEEK_API_KEY", HARDCODED_DEEPSEEK_API_KEY)
+    model: str = _cred("DEEPSEEK_MODEL", HARDCODED_DEEPSEEK_MODEL)
     temperature: float = 0.2
     max_tokens: int = 1024
     timeout_s: int = 90

@@ -4,7 +4,7 @@
 # Run in the *robocasa* conda env on the internet-capable 4090.
 set -e
 
-: "${DEEPSEEK_API_KEY:?set DEEPSEEK_API_KEY}"
+# DeepSeek creds are hardcoded in evaluation/robocasa/cot_planner.py.
 PORT=${PORT:-29056}
 TEST_NUM=${TEST_NUM:-25}
 TASKS=${TASKS:-"PnPCounterToCab PnPCounterToMicrowave OpenDrawer"}

@@ -52,34 +52,49 @@ the autoregressive world-model context carries across sub-task boundaries.
 Everything (Robocasa + LingBot server + DeepSeek planner) runs on the 4090 so
 the planner can reach `api.deepseek.com`.
 
-> **Run all `python` / `bash` commands below from the LingBot repo root**
-> (this directory's grandparent) with the **`robocasa` conda env activated**
-> for the clients/probe and the **`lingbot` env** for the server. `robocasa`
-> is pip-installed in that env, so `import robocasa` works from any cwd — you
-> do *not* need to `cd` into the robocasa asset dir to run these.
+> ### WHERE to run the commands
+> The LingBot repo on the **server** is:
+> ```
+> /inspire/hdd/project/26summer-camp-11/26220077/lingbot-va
+> ```
+> (your local `E:\sii_program\sii_wam_cot` is just the editing copy — sync the
+> new/changed files there first; see §0). **`cd` into the server repo root and
+> run everything from there** — that is what your failed
+> `python -m evaluation.robocasa.probe_env` was missing (you were in the
+> robocasa asset dir, which has no `evaluation` package). The scripts use the
+> **cwd-independent script-path form** (`python evaluation/robocasa/X.py`), so
+> they work as long as you launched them from the repo root. `robocasa` is
+> pip-installed in the conda env, so `import robocasa` resolves from any cwd.
 
 ```bash
-# (a) point the config at the LIBERO-Long checkpoint and set inference attn
-#     edit wan_va/configs/va_robocasa_cfg.py : wan22_pretrained_model_name_or_path
-#     edit <ckpt>/transformer/config.json    : "attn_mode": "torch"
+LINGBOT=/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va
 
-# (b) Robocasa assets (per project doc), in the robocasa conda env:
-conda activate robocasa
-cd /inspire/qb-ilm2/project/26summer-camp-11/public/group3/robocasa_suite/robocasa
+# (a) checkpoint: va_robocasa_cfg.py already points at
+#     $LINGBOT/checkpoints/lingbot-va-posttrain-libero-long
+#     -> just set that ckpt's transformer/config.json "attn_mode": "torch"
 
-# (c) DeepSeek creds
-export DEEPSEEK_API_KEY=sk-...
-export DEEPSEEK_MODEL=deepseek-v4-pro            # exact API model id
-export DEEPSEEK_BASE_URL=https://api.deepseek.com
+# (b) DeepSeek creds: edit ONCE in code (no `export` ever needed) —
+#     evaluation/robocasa/cot_planner.py : HARDCODED_DEEPSEEK_API_KEY
+#     (also HARDCODED_DEEPSEEK_MODEL if "deepseek-v4-pro" isn't your id)
 ```
+
+## 0. Sync local edits to the server repo
+
+These files are new/changed and must exist under `$LINGBOT`:
+`wan_va/wan_va_server.py`, `wan_va/configs/__init__.py`,
+`wan_va/configs/va_robocasa_cfg.py`, `evaluation/__init__.py`, and the whole
+`evaluation/robocasa/` directory.
 
 ## 3. Probe the real env FIRST (important)
 
 The Robocasa install lives on the server and its robosuite version / camera
 names / composite-controller action layout cannot be seen from the dev box.
+Run from the **server repo root** (script-path form, cwd-independent):
 
 ```bash
-python -m evaluation.robocasa.probe_env --env PnPCounterToCab \
+conda activate robocasa
+cd $LINGBOT
+python evaluation/robocasa/probe_env.py --env PnPCounterToCab \
        --save-frames --out outputs/robocasa_probe.json
 ```
 
@@ -97,10 +112,12 @@ escape hatch when auto-detect is wrong.
 ## 4. Run
 
 ```bash
-# terminal A (lingbot env): inference server
+cd $LINGBOT
+
+# terminal A — lingbot conda env: inference server
 bash evaluation/robocasa/launch_server.sh
 
-# terminal B (robocasa env): baseline
+# terminal B — robocasa conda env, from $LINGBOT: baseline
 bash evaluation/robocasa/launch_client.sh
 
 # terminal B: full WAM-CoT

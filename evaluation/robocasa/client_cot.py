@@ -45,7 +45,14 @@ sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 )
 
-from evaluation.robocasa.cot_planner import CoTPlanner, PlannerConfig  # noqa: E402
+from evaluation.robocasa.cot_planner import (  # noqa: E402
+    HARDCODED_DEEPSEEK_API_KEY,
+    HARDCODED_DEEPSEEK_BASE_URL,
+    HARDCODED_DEEPSEEK_MODEL,
+    CoTPlanner,
+    PlannerConfig,
+    _cred,
+)
 from evaluation.robocasa.eval_common import (  # noqa: E402
     WamSession,
     classify_failure,
@@ -329,10 +336,10 @@ def main():
                     help="VLM-monitor cadence in key-frames (API cost knob)")
     # planner / DeepSeek
     ap.add_argument("--vlm-model",
-                    default=os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-pro"))
+                    default=_cred("DEEPSEEK_MODEL", HARDCODED_DEEPSEEK_MODEL))
     ap.add_argument("--vlm-base-url",
-                    default=os.environ.get("DEEPSEEK_BASE_URL",
-                                           "https://api.deepseek.com"))
+                    default=_cred("DEEPSEEK_BASE_URL",
+                                  HARDCODED_DEEPSEEK_BASE_URL))
     ap.add_argument("--vlm-text-only", action="store_true",
                     help="force text-only planner (model not multimodal)")
     args = ap.parse_args()
@@ -344,9 +351,11 @@ def main():
         multimodal=not args.vlm_text_only,
         log_path=str(Path(args.out_dir) / "vlm_calls.jsonl"),
     )
-    if not pcfg.api_key and args.ablation != "no_cot":
-        print("WARNING: DEEPSEEK_API_KEY is empty; only --ablation no_cot "
-              "will work without it.")
+    if (not pcfg.api_key or "REPLACE" in pcfg.api_key) and args.ablation != "no_cot":
+        print("WARNING: DeepSeek API key not set. Edit "
+              "HARDCODED_DEEPSEEK_API_KEY in evaluation/robocasa/cot_planner.py "
+              "(or export DEEPSEEK_API_KEY). Only --ablation no_cot works "
+              "without it.")
     run(args.tasks, args.port, args.out_dir, args.test_num, overrides,
         args.max_steps, args.ablation, pcfg, args.monitor_every_keyframes)
 
