@@ -83,12 +83,19 @@ class RobocasaConfig:
     flip_images_vertically: bool = True
 
     # --- action layout (7-dim model action -> full env action) ------------
-    # Auto-detected from robot.composite_controller split indexes when
-    # possible. These are PandaOmron "BASIC" defaults used as fallback.
-    #   arm_action_slice : where the 6 OSC pose deltas go
-    #   gripper_index    : single gripper scalar position
-    # Everything else in the action vector is set to 0 (base/torso stationary).
-    action_dim: Optional[int] = None          # None -> read from env.action_dim
+    # VERIFIED on the server via probe_env.py (robosuite 1.5.2 / robocasa
+    # 1.0.1, WheeledRobot + HybridMobileBase composite controller):
+    #   action_dim = 12, all dims in [-1, 1]
+    #   right         [0:6)   OSC_POSE arm delta [dx,dy,dz, drx,dry,drz]
+    #   right_gripper [6:7)   gripper
+    #   base          [7:10)  mobile base   -> 0 (stationary)
+    #   torso         [10:11) torso         -> 0 (fixed)
+    #   index 11             HYBRID_MOBILE_BASE mode flag -> 0 (arm-control
+    #                        mode; base frozen) -- NOT in split_indexes
+    # _detect_action_layout() re-confirms this from the live controller at the
+    # first reset() and logs it; these concrete defaults are the verified
+    # fallback (and what runs if introspection is ever unavailable).
+    action_dim: Optional[int] = 12
     arm_action_slice: Tuple[int, int] = (0, 6)
     gripper_index: int = 6
     # Scaling / sign to bridge the LIBERO<->Robocasa convention gap. These are
