@@ -152,35 +152,7 @@ def main() -> None:
         _dump(report, args.out)
         return
 
-    # --- action space -----------------------------------------------------
-    report["action_dim"] = _safe(lambda: int(env.action_dim))
-    try:
-        low, high = env.action_spec
-        report["action_spec"] = {
-            "low": np.asarray(low).round(4).tolist(),
-            "high": np.asarray(high).round(4).tolist(),
-        }
-    except Exception as e:
-        report["action_spec_error"] = str(e)
-
-    # --- robot / controller action split ----------------------------------
-    try:
-        robot = env.robots[0]
-        report["robot_class"] = type(robot).__name__
-        cc = getattr(robot, "composite_controller", None)
-        report["composite_controller_class"] = type(cc).__name__ if cc else None
-        split = getattr(robot, "_action_split_indexes", None) or getattr(
-            robot, "action_split_indexes", None
-        )
-        report["action_split_indexes"] = _jsonable(split)
-        if cc is not None:
-            report["controller_parts"] = _safe(
-                lambda: list(cc.part_controllers.keys())
-            )
-    except Exception as e:
-        report["robot_introspect_error"] = str(e)
-
-    # --- reset + observation ---------------------------------------------
+    # --- reset FIRST: robosuite 1.5 builds robot/controller on reset() ----
     try:
         obs = env.reset()
         report["obs_keys"] = sorted(obs.keys())
@@ -195,6 +167,52 @@ def main() -> None:
         _dump(report, args.out)
         env.close()
         return
+
+    # --- action space (POST-reset, now that the robot exists) -------------
+    report["action_dim"] = _safe(lambda: int(env.action_dim))
+    try:
+        low, high = env.action_spec
+        report["action_spec"] = {
+            "len": int(len(np.asarray(low))),
+            "low": np.asarray(low).round(4).tolist(),
+            "high": np.asarray(high).round(4).tolist(),
+        }
+    except Exception as e:
+        report["action_spec_error"] = str(e)
+
+    # --- robot / controller action split (POST-reset) ---------------------
+    try:
+        robot = env.robots[0]
+        report["robot_class"] = type(robot).__name__
+        cc = getattr(robot, "composite_controller", None)
+        report["composite_controller_class"] = type(cc).__name__ if cc else None
+        split = (
+            getattr(robot, "_action_split_indexes", None)
+            or getattr(robot, "action_split_indexes", None)
+            or getattr(cc, "_action_split_indexes", None)
+            or getattr(cc, "action_split_indexes", None)
+        )
+        report["action_split_indexes"] = _jsonable(split)
+        if cc is not None:
+            report["controller_parts"] = _safe(
+                lambda: list(cc.part_controllers.keys())
+            )
+            report["cc_action_attrs"] = _safe(
+                lambda: sorted(
+                    a for a in dir(cc)
+                    if ("split" in a.lower() or "action" in a.lower())
+                    and not a.startswith("__")
+                )
+            )
+        report["robot_action_attrs"] = _safe(
+            lambda: sorted(
+                a for a in dir(robot)
+                if ("split" in a.lower() or "action_dim" in a.lower())
+                and not a.startswith("__")
+            )
+        )
+    except Exception as e:
+        report["robot_introspect_error"] = f"{e}\n{traceback.format_exc()}"
 
     # --- language instruction --------------------------------------------
     report["task_language"] = _safe(

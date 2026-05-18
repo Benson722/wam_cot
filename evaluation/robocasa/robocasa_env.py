@@ -157,43 +157,72 @@ def _env_camera_names(env) -> List[str]:
 
 
 def _detect_action_layout(env, cfg: RobocasaConfig) -> RobocasaConfig:
-    """Best-effort read of arm/gripper action indices from the robot's
-    composite controller; falls back to the cfg defaults."""
+    """Read arm/gripper action indices from the robot's composite controller.
+
+    MUST be called AFTER ``env.reset()`` — robosuite 1.5 lazily builds
+    ``env.robots`` / the composite controller on reset, so pre-reset
+    ``env.action_dim`` / ``env.robots[0]`` are ``None``. Falls back to the
+    PandaOmron HYBRID_MOBILE_BASE cfg defaults if introspection fails."""
     out = dataclasses.replace(cfg)
     try:
         out.action_dim = int(env.action_dim)
     except Exception:
-        out.action_dim = cfg.action_dim
+        try:
+            out.action_dim = int(len(env.action_spec[0]))
+        except Exception:
+            out.action_dim = cfg.action_dim
     try:
         robot = env.robots[0]
-        split = getattr(robot, "_action_split_indexes", None) or getattr(
-            robot, "action_split_indexes", None
+        cc = getattr(robot, "composite_controller", None)
+        split = (
+            getattr(robot, "_action_split_indexes", None)
+            or getattr(robot, "action_split_indexes", None)
+            or getattr(cc, "_action_split_indexes", None)
+            or getattr(cc, "action_split_indexes", None)
         )
-        # split: dict part_name -> (start, end)
-        if isinstance(split, dict):
-            arm_key = next(
-                (k for k in split if "right" in k.lower() and "grip" not in k.lower()),
-                None,
-            ) or next((k for k in split if "arm" in k.lower()), None)
+        # split: dict part_name -> (start, end)  (robosuite 1.5: keys like
+        # 'right', 'right_gripper', 'base', 'torso', 'base_mode'/'mobile_base')
+        if isinstance(split, dict) and split:
+            def _se(v):
+                return int(v[0]), int(v[1])
+
+            arm_key = (
+                next((k for k in split if k.lower() == "right"), None)
+                or next(
+                    (k for k in split
+                     if "right" in k.lower()
+                     and "grip" not in k.lower()
+                     and "base" not in k.lower()),
+                    None,
+                )
+                or next((k for k in split if "arm" in k.lower()), None)
+            )
             grip_key = next((k for k in split if "grip" in k.lower()), None)
             if arm_key is not None:
-                s, e = split[arm_key]
-                out.arm_action_slice = (int(s), int(s) + 6)
+                s, e = _se(split[arm_key])
+                # OSC_POSE arm is 6 dims (delta pos 3 + delta axis-angle 3)
+                out.arm_action_slice = (s, min(s + 6, e if e > s else s + 6))
             if grip_key is not None:
-                gs, _ = split[grip_key]
-                out.gripper_index = int(gs)
+                gs, _ = _se(split[grip_key])
+                out.gripper_index = gs
             logger.info(
-                "Detected action layout from controller: arm=%s gripper=%s (action_dim=%s)",
-                out.arm_action_slice,
-                out.gripper_index,
-                out.action_dim,
+                "Detected action layout: arm=%s gripper=%s action_dim=%s "
+                "(split=%s)",
+                out.arm_action_slice, out.gripper_index, out.action_dim,
+                {k: tuple(v) for k, v in split.items()},
+            )
+        else:
+            logger.warning(
+                "No action_split_indexes found; using HYBRID_MOBILE_BASE "
+                "defaults arm=%s grip=%s action_dim=%s. Override via "
+                "ENV_OVERRIDES if motion looks wrong.",
+                out.arm_action_slice, out.gripper_index, out.action_dim,
             )
     except Exception as e:
         logger.warning(
-            "Action-layout auto-detect failed (%s); using cfg defaults arm=%s grip=%s",
-            e,
-            cfg.arm_action_slice,
-            cfg.gripper_index,
+            "Action-layout auto-detect failed (%s); using defaults arm=%s "
+            "grip=%s action_dim=%s",
+            e, cfg.arm_action_slice, cfg.gripper_index, out.action_dim,
         )
     return out
 
@@ -243,7 +272,11 @@ class RobocasaEnv:
         # Some robosuite versions reject unknown kwargs; drop the optional ones
         # progressively until make() succeeds.
         self.env = self._make_env_resilient(robosuite, env_kwargs)
-        self.cfg = _detect_action_layout(self.env, cfg)
+        # NOTE: action-layout detection is deferred to the first reset() —
+        # robosuite 1.5 only builds env.robots / the composite controller on
+        # reset(), so doing it here would read None.
+        self.cfg = dataclasses.replace(cfg)
+        self._layout_detected = False
 
         self._resolved_cam: Dict[str, str] = {}
         self._last_obs: Optional[Dict[str, Any]] = None
@@ -405,6 +438,11 @@ class RobocasaEnv:
         self._resolved_cam = {}
         self._ep_steps = 0
         self._task_language = self._read_task_language()
+        # Detect the action layout now that robosuite 1.5 has built the robot
+        # + composite controller (impossible pre-reset). Done once.
+        if not self._layout_detected:
+            self.cfg = _detect_action_layout(self.env, self.cfg)
+            self._layout_detected = True
         # warm-up no-op steps (mirrors LIBERO client's settle loop)
         for _ in range(5):
             try:
