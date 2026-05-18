@@ -83,11 +83,6 @@
     "use_camera_obs",
     "use_object_obs"
   ],
-  "action_dim": "<error: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'>",
-  "action_spec_error": "'NoneType' object has no attribute 'action_limits'",
-  "robot_class": "NoneType",
-  "composite_controller_class": null,
-  "action_split_indexes": null,
   "obs_keys": [
     "distr_cab_pos",
     "distr_cab_quat",
@@ -347,7 +342,82 @@
       "dtype": "float64"
     }
   },
-  "task_language": "Pick the onion from the counter and place it in the cabinet.",
+  "action_dim": 12,
+  "action_spec": {
+    "len": 12,
+    "low": [
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0,
+      -1.0
+    ],
+    "high": [
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "robot_class": "WheeledRobot",
+  "composite_controller_class": "HybridMobileBase",
+  "action_split_indexes": {
+    "right": [
+      0,
+      6
+    ],
+    "right_gripper": [
+      6,
+      7
+    ],
+    "base": [
+      7,
+      10
+    ],
+    "torso": [
+      10,
+      11
+    ]
+  },
+  "controller_parts": [
+    "right",
+    "right_gripper",
+    "base",
+    "torso"
+  ],
+  "cc_action_attrs": [
+    "_action_split_indexes",
+    "_applied_action_dict",
+    "action_limits",
+    "create_action_dict_from_action_vector",
+    "create_action_vector",
+    "get_action_info",
+    "get_action_info_dict",
+    "print_action_info",
+    "print_action_info_dict",
+    "setup_action_split_idx"
+  ],
+  "robot_action_attrs": [
+    "_action_split_indexes",
+    "_joint_split_idx",
+    "action_dim"
+  ],
+  "task_language": "Pick the cheese grater from the counter and place it in the cabinet.",
   "ep_meta_keys": [
     "cam_configs",
     "fixture_refs",
