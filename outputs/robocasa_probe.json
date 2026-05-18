@@ -1,0 +1,370 @@
+{
+  "env_name": "PickPlaceCounterToCabinet",
+  "robots": "PandaOmron",
+  "versions": {
+    "robosuite": "1.5.2",
+    "robocasa": "1.0.1",
+    "numpy": "2.2.5"
+  },
+  "robosuite_file": "/inspire/qb-ilm2/project/26summer-camp-11/public/group3/robocasa_suite/robosuite/robosuite/__init__.py",
+  "controller_api": "load_composite_controller_config",
+  "controller_config": {
+    "type": "HYBRID_MOBILE_BASE",
+    "body_parts": {
+      "right": {
+        "type": "OSC_POSE",
+        "input_max": 1,
+        "input_min": -1,
+        "output_max": [
+          0.05,
+          0.05,
+          0.05,
+          0.5,
+          0.5,
+          0.5
+        ],
+        "output_min": [
+          -0.05,
+          -0.05,
+          -0.05,
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "kp": 150,
+        "damping_ratio": 1,
+        "impedance_mode": "fixed",
+        "kp_limits": [
+          0,
+          300
+        ],
+        "damping_ratio_limits": [
+          0,
+          10
+        ],
+        "position_limits": null,
+        "orientation_limits": null,
+        "uncouple_pos_ori": true,
+        "input_type": "delta",
+        "input_ref_frame": "base",
+        "interpolation": null,
+        "ramp_ratio": 0.2,
+        "gripper": {
+          "type": "GRIP"
+        }
+      },
+      "torso": {
+        "type": "JOINT_POSITION",
+        "interpolation": "null",
+        "kp": 2000
+      },
+      "base": {
+        "type": "JOINT_VELOCITY",
+        "interpolation": "null"
+      }
+    }
+  },
+  "env_candidates_tried": [
+    "PickPlaceCounterToCabinet"
+  ],
+  "env_name_used": "PickPlaceCounterToCabinet",
+  "requested_env": "PickPlaceCounterToCabinet",
+  "make_kwargs_used": [
+    "camera_heights",
+    "camera_names",
+    "camera_widths",
+    "control_freq",
+    "controller_configs",
+    "env_name",
+    "has_offscreen_renderer",
+    "has_renderer",
+    "ignore_done",
+    "robots",
+    "use_camera_obs",
+    "use_object_obs"
+  ],
+  "action_dim": "<error: int() argument must be a string, a bytes-like object or a real number, not 'NoneType'>",
+  "action_spec_error": "'NoneType' object has no attribute 'action_limits'",
+  "robot_class": "NoneType",
+  "composite_controller_class": null,
+  "action_split_indexes": null,
+  "obs_keys": [
+    "distr_cab_pos",
+    "distr_cab_quat",
+    "distr_cab_to_robot0_eef_pos",
+    "distr_cab_to_robot0_eef_quat",
+    "distr_counter_pos",
+    "distr_counter_quat",
+    "distr_counter_to_robot0_eef_pos",
+    "distr_counter_to_robot0_eef_quat",
+    "obj_pos",
+    "obj_quat",
+    "obj_to_robot0_eef_pos",
+    "obj_to_robot0_eef_quat",
+    "object-state",
+    "robot0_agentview_center_image",
+    "robot0_agentview_left_image",
+    "robot0_agentview_right_image",
+    "robot0_base_pos",
+    "robot0_base_quat",
+    "robot0_base_to_eef_pos",
+    "robot0_base_to_eef_quat",
+    "robot0_base_to_eef_quat_site",
+    "robot0_eef_pos",
+    "robot0_eef_quat",
+    "robot0_eef_quat_site",
+    "robot0_eye_in_hand_image",
+    "robot0_frontview_image",
+    "robot0_gripper_qpos",
+    "robot0_gripper_qvel",
+    "robot0_joint_acc",
+    "robot0_joint_pos",
+    "robot0_joint_pos_cos",
+    "robot0_joint_pos_sin",
+    "robot0_joint_vel",
+    "robot0_proprio-state"
+  ],
+  "image_keys": [
+    "robot0_agentview_center_image",
+    "robot0_agentview_left_image",
+    "robot0_agentview_right_image",
+    "robot0_eye_in_hand_image",
+    "robot0_frontview_image"
+  ],
+  "obs_shapes": {
+    "robot0_joint_pos": {
+      "shape": [
+        7
+      ],
+      "dtype": "float64"
+    },
+    "robot0_joint_pos_cos": {
+      "shape": [
+        7
+      ],
+      "dtype": "float64"
+    },
+    "robot0_joint_pos_sin": {
+      "shape": [
+        7
+      ],
+      "dtype": "float64"
+    },
+    "robot0_joint_vel": {
+      "shape": [
+        7
+      ],
+      "dtype": "float64"
+    },
+    "robot0_joint_acc": {
+      "shape": [
+        7
+      ],
+      "dtype": "float64"
+    },
+    "robot0_eef_pos": {
+      "shape": [
+        3
+      ],
+      "dtype": "float64"
+    },
+    "robot0_eef_quat": {
+      "shape": [
+        4
+      ],
+      "dtype": "float64"
+    },
+    "robot0_eef_quat_site": {
+      "shape": [
+        4
+      ],
+      "dtype": "float32"
+    },
+    "robot0_gripper_qpos": {
+      "shape": [
+        2
+      ],
+      "dtype": "float64"
+    },
+    "robot0_gripper_qvel": {
+      "shape": [
+        2
+      ],
+      "dtype": "float64"
+    },
+    "robot0_base_pos": {
+      "shape": [
+        3
+      ],
+      "dtype": "float64"
+    },
+    "robot0_base_quat": {
+      "shape": [
+        4
+      ],
+      "dtype": "float32"
+    },
+    "robot0_base_to_eef_pos": {
+      "shape": [
+        3
+      ],
+      "dtype": "float64"
+    },
+    "robot0_base_to_eef_quat": {
+      "shape": [
+        4
+      ],
+      "dtype": "float32"
+    },
+    "robot0_base_to_eef_quat_site": {
+      "shape": [
+        4
+      ],
+      "dtype": "float32"
+    },
+    "robot0_agentview_left_image": {
+      "shape": [
+        256,
+        256,
+        3
+      ],
+      "dtype": "uint8"
+    },
+    "robot0_agentview_right_image": {
+      "shape": [
+        256,
+        256,
+        3
+      ],
+      "dtype": "uint8"
+    },
+    "robot0_agentview_center_image": {
+      "shape": [
+        256,
+        256,
+        3
+      ],
+      "dtype": "uint8"
+    },
+    "robot0_eye_in_hand_image": {
+      "shape": [
+        256,
+        256,
+        3
+      ],
+      "dtype": "uint8"
+    },
+    "robot0_frontview_image": {
+      "shape": [
+        256,
+        256,
+        3
+      ],
+      "dtype": "uint8"
+    },
+    "obj_pos": {
+      "shape": [
+        3
+      ],
+      "dtype": "float64"
+    },
+    "obj_quat": {
+      "shape": [
+        4
+      ],
+      "dtype": "float64"
+    },
+    "obj_to_robot0_eef_pos": {
+      "shape": [
+        3
+      ],
+      "dtype": "float64"
+    },
+    "obj_to_robot0_eef_quat": {
+      "shape": [
+        4
+      ],
+      "dtype": "float32"
+    },
+    "distr_counter_pos": {
+      "shape": [
+        3
+      ],
+      "dtype": "float64"
+    },
+    "distr_counter_quat": {
+      "shape": [
+        4
+      ],
+      "dtype": "float64"
+    },
+    "distr_counter_to_robot0_eef_pos": {
+      "shape": [
+        3
+      ],
+      "dtype": "float64"
+    },
+    "distr_counter_to_robot0_eef_quat": {
+      "shape": [
+        4
+      ],
+      "dtype": "float32"
+    },
+    "distr_cab_pos": {
+      "shape": [
+        3
+      ],
+      "dtype": "float64"
+    },
+    "distr_cab_quat": {
+      "shape": [
+        4
+      ],
+      "dtype": "float64"
+    },
+    "distr_cab_to_robot0_eef_pos": {
+      "shape": [
+        3
+      ],
+      "dtype": "float64"
+    },
+    "distr_cab_to_robot0_eef_quat": {
+      "shape": [
+        4
+      ],
+      "dtype": "float32"
+    },
+    "robot0_proprio-state": {
+      "shape": [
+        68
+      ],
+      "dtype": "float64"
+    },
+    "object-state": {
+      "shape": [
+        42
+      ],
+      "dtype": "float64"
+    }
+  },
+  "task_language": "Pick the onion from the counter and place it in the cabinet.",
+  "ep_meta_keys": [
+    "cam_configs",
+    "fixture_refs",
+    "fixtures",
+    "gen_textures",
+    "init_robot_base_ori",
+    "init_robot_base_pos",
+    "lang",
+    "layout_id",
+    "object_cfgs",
+    "style_id"
+  ],
+  "has__check_success": true,
+  "sample_check_success": false,
+  "step_return": {
+    "reward": 0.0,
+    "done": false,
+    "info_keys": []
+  }
+}
