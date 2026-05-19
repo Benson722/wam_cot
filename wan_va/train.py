@@ -54,19 +54,58 @@ import gc
 class Trainer:
     def __init__(self, config):
         if config.enable_wandb and config.rank == 0:
-            import wandb  # lazy: only needed when wandb is actually enabled
-            wandb.login(host=os.environ['WANDB_BASE_URL'], key=os.environ['WANDB_API_KEY'])
-            self.wandb = wandb
-            self.wandb.init(
-                entity=os.environ["WANDB_TEAM_NAME"],
-                project=os.getenv("WANDB_PROJECT", "va_robotwin"),
-                # dir=log_dir,
-                config=config,
-                mode="online",
-                name='test_lln'
-                # name=os.path.basename(os.path.normpath(job_config.job.dump_folder))
-            )
-            logger.info("WandB logging enabled")
+            # OFFLINE-FIRST wandb: log to local disk, NO login / NO network.
+            # `wandb sync <wandb_dir>/wandb/offline-run-*` to upload later.
+            # Telemetry must NEVER crash training -> any failure degrades to
+            # disabled and the run continues.
+            wb_mode = (os.environ.get('WANDB_MODE')
+                       or getattr(config, 'wandb_mode', 'offline'))
+
+            def _clean(name, placeholder):
+                v = os.environ.get(name, '').strip()
+                if not v or v == placeholder:
+                    os.environ.pop(name, None)
+                    return None
+                return v
+
+            # run_va_posttrain.sh ships placeholders; strip them so wandb's
+            # pydantic Settings parsing doesn't reject WANDB_BASE_URL.
+            _u = _clean('WANDB_BASE_URL', 'your url')
+            if _u and not (_u.startswith('http://')
+                           or _u.startswith('https://')):
+                os.environ.pop('WANDB_BASE_URL', None)
+                _u = None
+            _k = _clean('WANDB_API_KEY', 'your key')
+            _team = _clean('WANDB_TEAM_NAME', 'your team name')
+            _proj = os.environ.get('WANDB_PROJECT', '').strip()
+            if not _proj or _proj == 'your project':
+                _proj = 'va_robotwin'
+            wb_dir = (getattr(config, 'wandb_dir', None)
+                      or os.path.join(getattr(config, 'save_root',
+                                              './train_out'), 'wandb'))
+            try:
+                os.makedirs(wb_dir, exist_ok=True)
+                os.environ['WANDB_MODE'] = wb_mode
+                import wandb  # lazy: only when wandb is actually used
+                if wb_mode == 'online' and _k:
+                    wandb.login(host=_u, key=_k)
+                self.wandb = wandb
+                self.wandb.init(
+                    entity=_team,
+                    project=_proj,
+                    config=config,
+                    mode=wb_mode,
+                    dir=wb_dir,
+                    name='test_lln',
+                )
+                logger.info(
+                    f"WandB enabled (mode={wb_mode}, dir={wb_dir}). "
+                    f"Offline runs: `wandb sync {wb_dir}/wandb/offline-run-*`")
+            except Exception as e:  # noqa: BLE001
+                logger.warning(
+                    "WandB disabled, training continues "
+                    f"({type(e).__name__}: {e})")
+                config.enable_wandb = False  # -> later self.wandb.log skipped
         self.step = 0
         self.config = config
         self.device = torch.device(f"cuda:{config.local_rank}")

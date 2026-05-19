@@ -13,7 +13,14 @@ va_robotwin_train_cfg.dataset_path = '/inspire/qb-ilm2/project/26summer-camp-11/
 # empty_emb.pt is expected next to the dataset; override here if it lives
 # elsewhere (e.g. a shared path) for your install.
 va_robotwin_train_cfg.empty_emb_path = os.path.join(va_robotwin_train_cfg.dataset_path, 'empty_emb.pt')
+# WandB: ON but OFFLINE by default — logs are written to disk only (no
+# login, no network). Sync later with:  wandb sync <wandb_dir>/wandb/offline-*
+# Set wandb_mode='online' (and real WANDB_* env) to stream to the cloud,
+# or enable_wandb=False to turn it off entirely.
 va_robotwin_train_cfg.enable_wandb = True
+va_robotwin_train_cfg.wandb_mode = 'offline'
+va_robotwin_train_cfg.wandb_dir = os.path.join(
+    va_robotwin_train_cfg.save_root, 'wandb')
 va_robotwin_train_cfg.load_worker = 16
 va_robotwin_train_cfg.save_interval = 1000
 va_robotwin_train_cfg.gc_interval = 50

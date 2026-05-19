@@ -16,10 +16,13 @@ if [ $# -ne 0 ]; then
     overrides="$*"
 fi
 
-export WANDB_API_KEY="your key"
-export WANDB_BASE_URL="your url"
-export WANDB_TEAM_NAME="your team name"
-export WANDB_PROJECT="your project"
+# WandB is OFFLINE by default (local logs, no login/network). Sync later:
+#   wandb sync <save_root>/wandb/wandb/offline-run-*
+# For cloud streaming instead: set WANDB_MODE=online plus real WANDB_API_KEY
+# / WANDB_BASE_URL / WANDB_TEAM_NAME before launching (do NOT use the old
+# "your key" placeholders — train.py strips those defensively anyway).
+export WANDB_MODE=${WANDB_MODE:-offline}
+export WANDB_PROJECT=${WANDB_PROJECT:-va_robotwin}
 
 ## node setting
 num_gpu=${NGPU}
