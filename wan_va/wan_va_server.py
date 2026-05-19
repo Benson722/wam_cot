@@ -328,6 +328,33 @@ class VA_Server:
             images = [images]
         if len(images) < 1:
             return None
+
+        # Robustness: depending on the client's msgpack version, dict keys may
+        # come back as bytes instead of str (the msgpack_numpy hook keys off
+        # bytes literals). Normalize every frame's keys to str so the
+        # configured str obs_cam_keys always resolve, and fail LOUDLY with the
+        # actual keys if a camera view is genuinely absent.
+        norm_images = []
+        for fi, frame in enumerate(images):
+            if not isinstance(frame, dict):
+                raise TypeError(
+                    f"_encode_obs: frame {fi} is {type(frame).__name__}, "
+                    f"expected a per-camera dict. obs top keys="
+                    f"{list(obs.keys())}")
+            nf = {}
+            for kk, vv in frame.items():
+                nf[kk.decode() if isinstance(kk, (bytes, bytearray)) else kk] = vv
+            norm_images.append(nf)
+        images = norm_images
+        for k in self.job_config.obs_cam_keys:
+            missing = [fi for fi, fr in enumerate(images) if k not in fr]
+            if missing:
+                raise KeyError(
+                    f"_encode_obs: camera key {k!r} missing in "
+                    f"{len(missing)}/{len(images)} frame(s). "
+                    f"Frame[0] keys={list(images[0].keys())}. "
+                    f"Configured obs_cam_keys={list(self.job_config.obs_cam_keys)}. "
+                    f"(Client must send exactly these keys.)")
         videos = []
         for k_i, k in enumerate(self.job_config.obs_cam_keys):
             if self.env_type == 'robotwin_tshape':
