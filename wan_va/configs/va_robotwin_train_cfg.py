@@ -10,9 +10,11 @@ va_robotwin_train_cfg.update(va_robotwin_cfg)
 # `dataset_path` is recursively scanned for `meta/info.json`, so point it at
 # the task dir (or a parent dir holding several such task dirs).
 va_robotwin_train_cfg.dataset_path = '/inspire/qb-ilm2/project/26summer-camp-11/public/group3/lingbot-robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_aug_500/adjust_bottle-aloha-agilex_randomized_500-1000'
-# empty_emb.pt is expected next to the dataset; override here if it lives
-# elsewhere (e.g. a shared path) for your install.
-va_robotwin_train_cfg.empty_emb_path = os.path.join(va_robotwin_train_cfg.dataset_path, 'empty_emb.pt')
+# empty_emb.pt (CFG null-prompt text embedding) is SHARED at the dataset
+# tree ROOT (one file for all task dirs), not inside each task dir. Point
+# at the official shared file. (If absent, regenerate with
+# evaluation/robotwin/make_empty_emb.py.)
+va_robotwin_train_cfg.empty_emb_path = '/inspire/qb-ilm2/project/26summer-camp-11/public/group3/lingbot-robotwin-clean-and-aug-lerobot/empty_emb.pt'
 # WandB: ON but OFFLINE by default — logs are written to disk only (no
 # login, no network). Sync later with:  wandb sync <wandb_dir>/wandb/offline-*
 # Set wandb_mode='online' (and real WANDB_* env) to stream to the cloud,
