@@ -45,22 +45,41 @@ py_compile 全通过；标注核心逻辑本地单测通过。
 
 ---
 
-## ⏭️ 下一步 (需在可训练环境做; 已给精确接线点): #1 模型侧 ~50 行
+## ✅ 已完成: #1 模型侧 (基于真实数据 schema 实现，py_compile 通过)
 
-未盲改 30 层 diffusion-transformer（本地无法训练验证）。精确接线规格:
+> 数据 I/O 已对真实数据校验：`data_example/.../meta/info.json` 确认
+> `action` 16 维、`left_gripper=idx7 / right_gripper=idx15`（与
+> `keyframe_annotate.py --gripper-idx 7 15` 默认一致）、parquet 路径
+> `data/chunk-{c:03d}/episode_{i:06d}.parquet`、`chunks_size=1000`、
+> `episodes.jsonl` 结构。`va_robotwin_train_cfg.dataset_path` 已指向 H200
+> 任务路径 `/inspire/.../adjust_bottle-aloha-agilex_randomized_500-1000`。
+> `keyframe_annotate.py` 加 `--episodes-file`（demo 的细粒度多阶段在
+> `episodes_ori.jsonl`）。
 
-- **取 hidden**: `wan_va/modules/model.py` 主干 forward 倒数第二层 block 输出
-  `h`（`[B, seq, d]`）；按 latent-token 区段切出每 latent frame 的 token，
-  时间维池化 → `h_t ∈ R^{B, F_lat, d}`。
-- **aux head**: `MLP(d→128→1)` → `pred_log_dist`；目标 `log1p(kf_dist)`，
-  `SmoothL1`(Huber)，`× kf_mask` 后对 mask 求均值。可选第二头
-  `MLP(d→128→K)` 预测 keyframe type（CE，同样 mask）。
-- **loss 接入**: `wan_va/train.py` `train_one_step`（约 L311
-  `loss = latent_loss + action_loss`）→ `+ cfg.kf_aux_weight * L_kf`；
-  仅 `cfg.kf_aux and cfg.kf_aux_weight>0` 时才构建/调用 head（关 = 零影响）。
-  `kf_dist/kf_mask` 已在 `batch_dict`，需在 `_prepare_input_dict` / forward
-  透传到 `compute_loss`（与 `actions_mask` 同路径）。
-- **推理**: aux head 可不调用；其输出可作 client 端 progress monitor。
+实现（全部 opt-in；`kf_aux_weight=0` 时 `kf_loss` 为常数 0、aux head 不接收
+梯度 → 训练动力学与 baseline 逐字节一致）：
+
+- **取 hidden** `wan_va/modules/model.py::forward_train`：在所有 block +
+  norm_out + scale/shift 之后、`torch.split` 取出 `latent_hidden_states`
+  （**proj_out 之前**的主干隐状态）；token 顺序 `(f h w)`（由
+  `_input_embed` 决定），`rearrange('1 (b f s) d -> b f s d')` 后对空间
+  维 `s` mean-pool → `[B, F_lat, d]`。
+- **aux head** `__init__`：`nn.Sequential(Linear(inner_dim,128), GELU,
+  Linear(128,1))`，恒构建（极小；从无此 head 的 ckpt `from_pretrained`
+  会随机初始化+warn，推理不调用）；`forward_train` 多返回 `kf_pred
+  [B,F_lat]`。
+- **loss 接入** `wan_va/train.py`：`_prepare_input_dict` 透传
+  `kf_dist/kf_mask`（缺失=None）；`compute_loss` 解包 3 元组，
+  `SmoothL1(log1p(kf_dist), kf_pred)` masked-mean × `cfg.kf_aux_weight`，
+  长度做防御性对齐；`_train_step` `loss = latent+action+kf`，日志加
+  `kf_loss`。仅 `cfg.kf_aux & kf_aux_weight>0 & 有标注` 时生效。
+- **推理**：aux head 不参与 inference（`forward` 不走 `forward_train`）；
+  其输出可作 client 端 progress monitor（后续可选）。
+
+启用步骤：① `python evaluation/robotwin/keyframe_annotate.py --dataset
+<task_dir> --gripper-idx 7 15`（可加 `--episodes-file episodes_ori.jsonl
+--with-stage-boundaries`）→ 生成 `meta/keyframes.jsonl`；② 训练配置置
+`kf_aux=True, kf_aux_weight=0.1`（计划建议训稳后降 0.05）。
 
 ---
 

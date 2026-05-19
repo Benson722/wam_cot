@@ -4,3 +4,4 @@ checkpoints/
 datasets/
 
 .venv/
+data_example/

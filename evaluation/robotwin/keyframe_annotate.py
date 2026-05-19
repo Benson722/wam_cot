@@ -36,10 +36,14 @@ from typing import List, Optional, Tuple
 import numpy as np
 
 
-def _load_episodes_meta(meta_dir: Path) -> List[dict]:
-    """Read meta/episodes.jsonl (LeRobot v2). Each line: episode_index,
-    length, tasks, action_config[{start_frame,end_frame,...}]."""
-    fp = meta_dir / "episodes.jsonl"
+def _load_episodes_meta(meta_dir: Path,
+                        episodes_file: str = "episodes.jsonl") -> List[dict]:
+    """Read meta/<episodes_file> (LeRobot v2). Each line: episode_index,
+    length, tasks, action_config[{start_frame,end_frame,...}].
+
+    Use ``episodes_ori.jsonl`` for the finer multi-stage segmentation when
+    present (the loader's ``episodes.jsonl`` may be coarsened to 1 segment)."""
+    fp = meta_dir / episodes_file
     if not fp.exists():
         raise FileNotFoundError(f"{fp} not found (expected LeRobot meta).")
     out = []
@@ -143,9 +147,10 @@ def annotate_dataset(
     gripper_idx: Tuple[int, ...],
     with_stage_boundaries: bool,
     out_name: str = "keyframes.jsonl",
+    episodes_file: str = "episodes.jsonl",
 ) -> Path:
     meta_dir = dataset / "meta"
-    episodes = _load_episodes_meta(meta_dir)
+    episodes = _load_episodes_meta(meta_dir, episodes_file)
     out_fp = meta_dir / out_name
     n_ok, n_skip, n_kf = 0, 0, 0
     with open(out_fp, "w", encoding="utf-8") as fout:
@@ -193,10 +198,14 @@ def main():
                          "(RoboTwin aloha-agilex default: 7=left, 15=right).")
     ap.add_argument("--with-stage-boundaries", action="store_true",
                     help="Also add action_config segment starts as keyframes.")
+    ap.add_argument("--episodes-file", default="episodes.jsonl",
+                    help="meta/<file> to read (use episodes_ori.jsonl for the "
+                         "finer multi-stage segmentation).")
     ap.add_argument("--out-name", default="keyframes.jsonl")
     args = ap.parse_args()
     annotate_dataset(Path(args.dataset), tuple(args.gripper_idx),
-                     args.with_stage_boundaries, args.out_name)
+                     args.with_stage_boundaries, args.out_name,
+                     args.episodes_file)
 
 
 if __name__ == "__main__":

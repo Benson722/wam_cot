@@ -650,6 +650,15 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         self.scale_shift_table = nn.Parameter(
             torch.randn(1, 2, inner_dim) / inner_dim**0.5)
 
+        # Latent-CoT #1: keyframe auxiliary head — regresses log1p(distance to
+        # next keyframe) per latent frame from the backbone hidden, forcing the
+        # latent to encode task-progress (implicit physical CoT; latent_plan.md
+        # #1). Always built (tiny): from_pretrained of checkpoints without it
+        # just random-inits + warns; only USED/optimized when the training
+        # config sets kf_aux=True & kf_aux_weight>0 — inference never calls it.
+        self.kf_aux_head = nn.Sequential(
+            nn.Linear(inner_dim, 128), nn.GELU(), nn.Linear(128, 1))
+
     def clear_cache(self, cache_name):
         for block in self.blocks:
             block.attn1.clear_cache(cache_name)
@@ -786,6 +795,15 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                                 (1. + scale) +
                                 shift).type_as(hidden_states)
         latent_hidden_states, _, action_hidden_states, _, _ = torch.split(hidden_states, split_list, dim=1)
+
+        # Latent-CoT #1: per-latent-frame distance-to-next-keyframe from the
+        # backbone hidden (BEFORE proj_out). Token order is (f h w) per sample
+        # (see _input_embed), so split off f and mean-pool the spatial tokens.
+        f_lat = latent_dict['noisy_latents'].shape[2] // self.patch_size[0]
+        kf_feat = rearrange(latent_hidden_states, '1 (b f s) d -> b f s d',
+                            b=batch_size, f=f_lat).mean(dim=2)
+        kf_pred = self.kf_aux_head(kf_feat).squeeze(-1)  # [B, f_lat]
+
         latent_hidden_states = self.proj_out(latent_hidden_states)
         latent_hidden_states = rearrange(latent_hidden_states,
                                              '1 (b l) (n c) -> b (l n) c',
@@ -795,7 +813,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                                              '1 (b l) c -> b l c',
                                              b=batch_size)  #
 
-        return latent_hidden_states, action_hidden_states
+        return latent_hidden_states, action_hidden_states, kf_pred
 
     def forward(
         self,

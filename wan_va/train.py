@@ -245,6 +245,10 @@ class Trainer:
             'chunk_size': torch.randint(1, 5, (1,)).item(),
             'window_size': torch.randint(4, 65, (1,)).item(),
         }
+        # Latent-CoT #1: pass keyframe targets through (None when the dataset
+        # didn't add them, i.e. cfg.kf_aux off -> loss term is skipped).
+        input_dict['kf_dist'] = batch_dict.get('kf_dist')
+        input_dict['kf_mask'] = batch_dict.get('kf_mask')
         return input_dict
 
     def convert_input_format(self, input_dict):
@@ -257,7 +261,8 @@ class Trainer:
         input_dict,
         pred
     ):
-        latent_pred, action_pred = pred
+        latent_pred, action_pred = pred[0], pred[1]
+        kf_pred = pred[2] if len(pred) > 2 else None  # Latent-CoT #1
         action_pred = rearrange(action_pred, 'b (f n) c -> b c f n 1', f=input_dict['action_dict']['targets'].shape[-3])
         latent_pred = data_seq_to_patch(
                         self.patch_size, latent_pred,
@@ -292,7 +297,30 @@ class Trainer:
         action_mask_per_frame = action_mask.sum(dim=1)  # (B*F,)
         action_loss = (action_loss_per_frame / (action_mask_per_frame + 1e-6)).mean()
 
-        return latent_loss / self.gradient_accumulation_steps, action_loss / self.gradient_accumulation_steps
+        # ---- Latent-CoT #1: keyframe-distance auxiliary loss ------------
+        # Strict no-op unless cfg.kf_aux & kf_aux_weight>0 AND the dataset
+        # supplied kf targets. Huber on log1p(distance), masked-mean.
+        kf_loss = torch.zeros((), device=action_pred.device,
+                              dtype=torch.float32)
+        cfg = self.config
+        if (getattr(cfg, 'kf_aux', False)
+                and float(getattr(cfg, 'kf_aux_weight', 0.0)) > 0.0
+                and kf_pred is not None
+                and input_dict.get('kf_mask') is not None
+                and input_dict.get('kf_dist') is not None):
+            kf_dist = input_dict['kf_dist'].to(kf_pred.device).float()
+            kf_mask = input_dict['kf_mask'].to(kf_pred.device).float()
+            # defensive length align (latent_frame_num rounding safety)
+            n = min(kf_pred.shape[-1], kf_dist.shape[-1], kf_mask.shape[-1])
+            kp = kf_pred[..., :n].float()
+            tgt = torch.log1p(kf_dist[..., :n].clamp(min=0.0))
+            m = kf_mask[..., :n]
+            per = F.smooth_l1_loss(kp, tgt, reduction='none') * m
+            kf_loss = per.sum() / (m.sum() + 1e-6)
+            kf_loss = kf_loss * float(cfg.kf_aux_weight)
+
+        gas = self.gradient_accumulation_steps
+        return latent_loss / gas, action_loss / gas, kf_loss / gas
 
     def _train_step(self, batch, batch_idx):
         """Train a single batch, returns losses for logging."""
@@ -307,12 +335,14 @@ class Trainer:
             self.transformer.set_requires_gradient_sync(True)
 
         output = self.transformer(input_dict, train_mode=True)
-        latent_loss, action_loss = self.compute_loss(input_dict, output)
-        loss = latent_loss + action_loss
+        latent_loss, action_loss, kf_loss = self.compute_loss(input_dict, output)
+        loss = latent_loss + action_loss + kf_loss
 
         loss.backward()
 
-        losses = {'latent_loss': latent_loss.detach(), 'action_loss': action_loss.detach()}
+        losses = {'latent_loss': latent_loss.detach(),
+                  'action_loss': action_loss.detach(),
+                  'kf_loss': kf_loss.detach()}
         
         # Only update weights after accumulating gradients
         if should_sync:

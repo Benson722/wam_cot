@@ -6,7 +6,12 @@ import os
 va_robotwin_train_cfg = EasyDict(__name__='Config: VA robotwin train')
 va_robotwin_train_cfg.update(va_robotwin_cfg)
 
-va_robotwin_train_cfg.dataset_path = '/path/to/your/dataset'
+# H200 server: a single RoboTwin task in LeRobot format (already downloaded).
+# `dataset_path` is recursively scanned for `meta/info.json`, so point it at
+# the task dir (or a parent dir holding several such task dirs).
+va_robotwin_train_cfg.dataset_path = '/inspire/qb-ilm2/project/26summer-camp-11/public/group3/lingbot-robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_aug_500/adjust_bottle-aloha-agilex_randomized_500-1000'
+# empty_emb.pt is expected next to the dataset; override here if it lives
+# elsewhere (e.g. a shared path) for your install.
 va_robotwin_train_cfg.empty_emb_path = os.path.join(va_robotwin_train_cfg.dataset_path, 'empty_emb.pt')
 va_robotwin_train_cfg.enable_wandb = True
 va_robotwin_train_cfg.load_worker = 16
