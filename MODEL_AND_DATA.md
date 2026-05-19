@@ -76,6 +76,89 @@ VAE latent 对 adjust_bottle 抓取前/后 val_acc≈0.80，chance 0.50）；`h_
 
 ---
 
+## 2.5 损失函数定义与物理意义（精确版）
+
+训练总损失（`wan_va/train.py:compute_loss/_train_step`，gas =
+`gradient_accumulation_steps`）：
+
+```
+L_total = ( L_video + L_action + λ_kf · L_kf ) / gas
+```
+
+记号：模型按 **flow-matching** 训练——对干净 latent `z0` 在随机扩散时间步
+`t` 加噪得 `z_t`，模型预测目标 `target`（flow 速度场），
+`w(t)=scheduler.training_weight(t)` 是 flow-matching 的 SNR 时间步权重。
+
+### (1) `L_video`（视频/世界模型损失 ≈ 0.10–0.15）
+
+```
+latent_pred = unpatchify(transformer_video_stream)            # (B,48,F,H,W)
+e = w_v(t) · ( latent_pred − target_video )^2                  # 逐元素 MSE×权重
+L_video = mean_over(B·F) [ sum_{C,H,W} e  /  (#elems) ]
+```
+- **是什么**：Wan2.2 VAE **48 通道视频 latent** 的流匹配去噪误差（逐 latent
+  帧归一化后对 B×F 取均值）。
+- **物理意义**：世界模型"**想象未来视觉动力学**"的准确度——给定历史观测，
+  模型在潜空间预测接下来若干帧场景会如何演变。这是 WAM 的"世界"部分。
+- 不降到 0 属正常：自然场景视频 latent 的随机性下限较高，~0.1 量级是收敛态。
+
+### (2) `L_action`（动作损失 ≈ 1e-3，很快降很低）
+
+```
+action_pred 重排为 (B,30,F,n,1)
+e = w_a(t) · (action_pred − target_action)^2 · actions_mask
+L_action = mean_over(B·F) [ sum e_masked / (#masked elems) ]
+```
+- **是什么**：动作扩散头输出的流匹配误差。动作空间标称 30 维，RoboTwin 经
+  `used_action_channel_ids` 实际只用 **14 维**（左臂 EEF 6 + 左夹爪 1 + 右臂
+  EEF 6 + 右夹爪 1，已做分位 q01/q99 归一化、相对位姿 `get_relative_pose`）；
+  `actions_mask` 把未用/补零通道屏蔽，只对真实通道计损失。
+- **物理意义**：模型"**该输出什么底层电机指令**"（双臂末端位姿增量 + 夹爪）
+  的准确度。这是 WAM 的"动作"部分，也是最终决定 SR 的输出。
+- 收敛快且很低（~1e-3）：动作在专家数据上高度规律、可预测。
+
+### (3) `L_kf`（关键帧距离辅助损失 = 隐式物理 CoT，本项目新增）
+
+```
+h_t  = mean_{空间}( backbone_latent_hidden )      # 每 latent 帧 d 维(proj_out 之前)
+kf_pred = kf_aux_head(h_t)                         # (B, F_lat)
+tgt = log1p( kf_dist )                             # kf_dist=到下一关键帧的原始帧数
+L_kf = λ_kf · mean_{kf_mask} SmoothL1( kf_pred, tgt )
+```
+- **是什么**：每个 latent 时间步，回归"**距离下一个物理关键事件（夹爪
+  grasp/release / 轨迹末端 end）还有多少帧**"，对数压缩 + Huber，按
+  `kf_mask`（有定义的帧）求均值，× `λ_kf = kf_aux_weight = 0.1`。
+- **物理意义（核心）**：强迫主干 latent 在每一时刻**显式编码"任务进度 /
+  距下一阶段切换的时间"** —— 这就是把"思维链"灌进权重的**隐式物理 CoT**：
+  模型不靠外部 VLM，而是其世界模型表征本身携带阶段/时序结构，从而利于
+  长程任务的稳定与成功率。
+- **设计细节与依据**：① `log1p`：帧距动态范围大（0–~200），对数压缩使回归
+  稳定；② `SmoothL1`(Huber)：对关键帧边界附近的离群目标鲁棒；③ `kf_mask`：
+  末段无"下一个关键帧"时不惩罚；④ `λ_kf=0.1` 小权重：只**塑形** backbone，
+  不喧宾夺主压过 video/action 主目标（故显示值 ~1e-3 = 原始 Huber ~1e-2 ×
+  0.1）；⑤ 收敛快（几百步内 ~1e-3）属**预期**：对强 backbone 而言"到下一
+  关键帧的帧数"是近单调、易学的信号，**不是 bug**。关闭 `kf_aux` 时
+  `L_kf≡0` 且 aux 头不接收梯度，训练与原模型逐字节一致。
+
+> 三者关系：`L_video`/`L_action` 是 LingBot 原本的世界-动作联合目标（保持
+> 基座能力）；`L_kf` 是叠加的弱监督，专门让 latent 习得物理阶段结构。报告做
+> 消融时：`kf_aux=False`（纯基线）vs `kf_aux=True`（+隐式 CoT），再用
+> `latent_probe.py` 比较两者 latent 的阶段线性可分性（#4 核心结论）。
+
+## 2.6 训练产出与中途停止
+
+- **检查点**：`save_checkpoint()` 每 `save_interval` 步写一次到
+  `<save_root>/.../checkpoint_step_<N>/transformer/`（diffusers 格式
+  safetensors + config.json，可直接 `from_pretrained` / 我们的
+  `load_transformer` 复用，也供 `latent_probe.py --features h_hidden`）。
+- **中途 Ctrl-C 保存**（已实现）：训练循环注册 SIGINT/SIGTERM 处理器，**只
+  置标志位**，在下一个优化步边界**集体**（all-reduce 决定，避免 FSDP 保存
+  collective 死锁）调用 `save_checkpoint()` 后干净退出。因此收敛快时可随时
+  Ctrl-C，会在 `checkpoint_step_<当前步>` 留下可用权重（**再按一次 Ctrl-C
+  会硬杀，可能损坏保存**——只按一次、等它打印 "Interrupt: saving
+  checkpoint ... then exiting." 即可）。建议把 `save_interval` 调小（如 200）
+  作双保险。
+
 ## 3. 使用的数据集
 
 **任务**：RoboTwin 2.0 `adjust_bottle`（aloha-agilex 双臂，单瓶抓取并保持

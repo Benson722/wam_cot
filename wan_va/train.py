@@ -1,6 +1,7 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
 import argparse
 import os
+import signal
 import sys
 from pathlib import Path
 # NOTE: wandb is imported LAZILY inside Trainer.__init__ only when
@@ -498,6 +499,24 @@ class Trainer:
         logger.info(f"Starting training for {self.config.num_steps} steps...")
         self.transformer.train()
 
+        # Graceful Ctrl-C: SIGINT/SIGTERM only sets a flag; we checkpoint and
+        # exit cleanly at the next optimizer-step boundary (so the FSDP
+        # collective save isn't interrupted mid-write). Useful since the model
+        # converges fast and one rarely needs all num_steps.
+        self._stop_requested = False
+
+        def _request_stop(signum, _frame):
+            self._stop_requested = True
+            logger.warning(
+                f"Signal {signum} received -> will save a checkpoint and "
+                "stop at the next step boundary (press again to hard-kill).")
+
+        for _s in (signal.SIGINT, signal.SIGTERM):
+            try:
+                signal.signal(_s, _request_stop)
+            except Exception:  # noqa: BLE001
+                pass
+
         progress_bar = tqdm(
             total=self.config.num_steps,
             desc="Training",
@@ -575,6 +594,23 @@ class Trainer:
                     if self.config.rank == 0:
                         logger.info(f"Starting save model at step {self.step}")
                     self.save_checkpoint()
+
+                # Cooperative early stop (Ctrl-C). Decide COLLECTIVELY so all
+                # ranks enter the (collective) save together -> no deadlock.
+                stop_t = torch.tensor(
+                    [1 if getattr(self, '_stop_requested', False) else 0],
+                    device=self.device)
+                if dist.is_initialized():
+                    dist.all_reduce(stop_t, op=dist.ReduceOp.MAX)
+                if stop_t.item() > 0:
+                    if self.config.rank == 0:
+                        logger.info(
+                            f"Interrupt: saving checkpoint at step "
+                            f"{self.step} then exiting.")
+                    self.save_checkpoint()
+                    if dist.is_initialized():
+                        dist.barrier()
+                    break
 
             if dist.is_initialized():
                 dist.barrier()
