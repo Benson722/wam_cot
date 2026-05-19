@@ -108,8 +108,12 @@ py_compile 全通过；标注核心逻辑本地单测通过。
     `tsne_*.png`（sklearn t-SNE，缺失则 torch PCA-2D 回退）+ probe 权重。
   - `--features h_hidden`：保留（`forward_train` 已暴露 `kf_feat`），待 #1
     训出 ckpt 后做 stock-vs-#1 对比，当前主动 NotImplementedError 指引。
+- **z_latent probe 不需要 lerobot**：直接读 `.pth` latent（standalone
+  reader），只用 torch+numpy(+matplotlib)。lerobot 仅**训练**需要
+  (`uv pip install lerobot==0.3.3 scipy wandb --no-deps`，见 README L245)。
 - 运行: `python evaluation/robotwin/latent_probe.py --config robotwin_train
   --num-samples 400 --out-dir experiments/probing`
+  （或 `--dataset <task_dir> --cam-key observation.images.cam_high`）
 - **预期/解读**：`adjust_bottle` 仅 2 阶段（grasp 前/后）→ chance=0.50。
   val_acc 显著 >0.5（如 >0.65）= 即便 stock 表征，VAE latent 已线性可分
   manipulation 阶段（隐式物理编码的弱证据/基线）；接近 0.5 = 不可分。

@@ -40,29 +40,90 @@ sys.path.insert(
     0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
 
-def _collect(dset, num_samples: int):
-    """Iterate the dataset and pull (z_latent feature, stage, episode) per
-    latent frame. Feature = spatial-mean-pooled VAE latent -> [C]."""
+def _find_dataset_dirs(root):
+    """Dirs under `root` that have BOTH meta/keyframes.jsonl and latents/.
+    `root` itself may be such a dir (single task) or a parent of many."""
+    import glob
+    root = str(root)
+    hits = set()
+    for kf in glob.glob(os.path.join(root, "**", "meta", "keyframes.jsonl"),
+                         recursive=True) + (
+            [os.path.join(root, "meta", "keyframes.jsonl")]):
+        d = os.path.dirname(os.path.dirname(kf))
+        if os.path.isfile(kf) and os.path.isdir(os.path.join(d, "latents")):
+            hits.add(d)
+    return sorted(hits)
+
+
+def _load_keyframes_jsonl(fp):
+    out = {}
+    with open(fp, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line:
+                d = json.loads(line)
+                out[int(d["episode_index"])] = np.asarray(
+                    sorted(int(x) for x in d["keyframes"]), dtype=np.int64)
+    return out
+
+
+def _collect(dataset_root, cam_key, kf_file, num_samples):
+    """STANDALONE (no lerobot): read per-episode .pth latents directly +
+    derive per-latent-frame stage from keyframes.jsonl + the .pth frame_ids
+    (same alignment as the dataset loader's kf hook). Feature = spatial
+    mean-pooled VAE latent per latent frame -> [C]."""
+    import glob
+
+    import torch
+
+    dirs = _find_dataset_dirs(dataset_root)
+    if not dirs:
+        raise RuntimeError(
+            f"No dataset dir with meta/keyframes.jsonl + latents/ under "
+            f"{dataset_root}. Run evaluation/robotwin/keyframe_annotate.py "
+            f"first (and check the path).")
     feats, labels, eps = [], [], []
-    n = min(len(dset), num_samples) if num_samples > 0 else len(dset)
-    for i in range(n):
-        item = dset[i]
-        if "kf_stage" not in item:
-            raise RuntimeError(
-                "Dataset has no 'kf_stage' — set cfg.kf_aux=True AND run "
-                "keyframe_annotate.py so meta/keyframes.jsonl exists.")
-        lat = item["latents"]                    # [C, F, H, W]
-        lat = np.asarray(lat.float().cpu())
-        C, F = lat.shape[0], lat.shape[1]
-        z = lat.reshape(C, F, -1).mean(axis=2).T  # [F, C]  spatial mean-pool
-        st = np.asarray(item["kf_stage"].cpu()).reshape(-1)
-        ep = int(item["kf_episode"]) if "kf_episode" in item else i
-        m = min(F, st.shape[0])
-        feats.append(z[:m])
-        labels.append(st[:m])
-        eps.append(np.full(m, ep, dtype=np.int64))
-        if (i + 1) % 50 == 0:
-            print(f"[probe] collected {i + 1}/{n} episodes")
+    n_done = 0
+    for di, d in enumerate(dirs):
+        kfmap = _load_keyframes_jsonl(
+            os.path.join(d, "meta", kf_file if kf_file else "keyframes.jsonl"))
+        cam_root = os.path.join(d, "latents")
+        for ep in sorted(kfmap.keys()):
+            if num_samples > 0 and n_done >= num_samples:
+                break
+            kfs = kfmap[ep]
+            pths = sorted(glob.glob(os.path.join(
+                cam_root, "chunk-*", cam_key,
+                f"episode_{ep:06d}_*.pth")))
+            for pth in pths:
+                try:
+                    rec = torch.load(pth, weights_only=False,
+                                     map_location="cpu")
+                except Exception as e:  # noqa: BLE001
+                    print(f"[probe] skip {pth}: {e}")
+                    continue
+                lat = rec["latent"].float()                # [(f h w), c]
+                f = int(rec["latent_num_frames"])
+                h = int(rec["latent_height"])
+                w = int(rec["latent_width"])
+                lat = lat.reshape(f, h * w, lat.shape[-1])
+                z = lat.mean(dim=1).numpy()                # [f, C]
+                fids = np.asarray(rec["frame_ids"],
+                                  dtype=np.int64).reshape(-1)
+                st = np.zeros(f, dtype=np.int64)
+                for i in range(f):
+                    rep = int(fids[min(i * 4, len(fids) - 1)])
+                    st[i] = int((kfs < rep).sum())
+                gid = di * 1_000_000 + ep
+                feats.append(z.astype(np.float32))
+                labels.append(st)
+                eps.append(np.full(f, gid, dtype=np.int64))
+                n_done += 1
+                if n_done % 50 == 0:
+                    print(f"[probe] collected {n_done} segments")
+    if not feats:
+        raise RuntimeError("No latent .pth segments found for the keyframe "
+                           f"episodes (cam_key={cam_key}).")
     X = np.concatenate(feats, 0).astype(np.float32)
     y = np.concatenate(labels, 0).astype(np.int64)
     g = np.concatenate(eps, 0).astype(np.int64)
@@ -163,11 +224,16 @@ def _tsne_png(X, y, path, seed):
 def main():
     ap = argparse.ArgumentParser(description="Latent-CoT #4 probing + t-SNE")
     ap.add_argument("--config", default="robotwin_train",
-                    help="VA_CONFIGS key (dataset + kf settings)")
+                    help="VA_CONFIGS key (only for dataset_path/obs_cam_keys/"
+                         "kf_file; NO lerobot import)")
+    ap.add_argument("--dataset", default=None,
+                    help="override dataset root (else cfg.dataset_path)")
+    ap.add_argument("--cam-key", default=None,
+                    help="latents/<cam> to probe (else cfg.obs_cam_keys[0])")
     ap.add_argument("--features", choices=["z_latent", "h_hidden"],
                     default="z_latent")
     ap.add_argument("--num-samples", type=int, default=400,
-                    help="cap on dataset episodes scanned (0 = all)")
+                    help="cap on .pth segments scanned (0 = all)")
     ap.add_argument("--epochs", type=int, default=50)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--device", default="cpu")
@@ -181,16 +247,19 @@ def main():
             "ckpt exists (stock-vs-#1 comparison). Use --features z_latent "
             "for the offline baseline now.")
 
+    # NOTE: configs are pure easydict (no lerobot in the import chain);
+    # the z_latent probe reads .pth latents directly, so lerobot is NOT
+    # required here (only model TRAINING needs it).
     from wan_va.configs import VA_CONFIGS
-    from wan_va.dataset.lerobot_latent_dataset import MultiLatentLeRobotDataset
 
     cfg = VA_CONFIGS[args.config]
-    cfg.kf_aux = True  # force the loader to emit kf_stage/kf_episode
-    print(f"[probe] config={args.config} dataset={cfg.dataset_path}")
-    dset = MultiLatentLeRobotDataset(config=cfg)
-    print(f"[probe] dataset size = {len(dset)}")
+    dataset_root = args.dataset or cfg.dataset_path
+    cam_key = args.cam_key or cfg.obs_cam_keys[0]
+    kf_file = getattr(cfg, "kf_file", "keyframes.jsonl")
+    print(f"[probe] dataset={dataset_root} cam_key={cam_key} "
+          f"kf_file={kf_file}")
 
-    X, y, g = _collect(dset, args.num_samples)
+    X, y, g = _collect(dataset_root, cam_key, kf_file, args.num_samples)
     S = int(y.max()) + 1
     chance = 1.0 / S
     tr, va = _traj_split(g, args.seed)
