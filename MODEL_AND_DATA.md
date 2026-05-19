@@ -158,6 +158,15 @@ L_kf = λ_kf · mean_{kf_mask} SmoothL1( kf_pred, tgt )
   会硬杀，可能损坏保存**——只按一次、等它打印 "Interrupt: saving
   checkpoint ... then exiting." 即可）。建议把 `save_interval` 调小（如 200）
   作双保险。
+- **磁盘配额（重要）**：训练所在 `/inspire/hdd/.../26220077` 仅 ~11G 且基座
+  ckpt 已占满，checkpoint/wandb/日志/HF arrow 缓存写满即
+  `OSError: Disk quota exceeded` 崩溃（曾在 ~step 82 触发）。解决（**不改
+  Python 代码**）：① 把 `train_out/` 软链到 qb-ilm2 大盘
+  （`ln -s /inspire/qb-ilm2/.../lingbot-va/train_out
+  /inspire/hdd/.../lingbot-va/train_out`）——一举把 checkpoint+wandb+
+  torchrun 日志都导向大盘；② `run_va_posttrain.sh` 已设
+  `HF_HOME/HF_DATASETS_CACHE/HF_LEROBOT_HOME → CACHE_ROOT`
+  （qb-ilm2），避免数据集 arrow 缓存（多任务更大）再写满小盘。
 
 ## 3. 使用的数据集
 

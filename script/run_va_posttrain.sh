@@ -24,6 +24,18 @@ fi
 export WANDB_MODE=${WANDB_MODE:-offline}
 export WANDB_PROJECT=${WANDB_PROJECT:-va_robotwin}
 
+# The /inspire/hdd training quota is tiny (~11G) and fills up (checkpoints,
+# wandb, torchrun logs, HF arrow cache) -> "Disk quota exceeded" crash.
+# Put HF/lerobot dataset caches on the roomy qb-ilm2 disk. (Checkpoints +
+# wandb + logs go under save_root='./train_out' — symlink that dir to
+# qb-ilm2 too; see MODEL_AND_DATA.md §2.6.) Override CACHE_ROOT if needed.
+CACHE_ROOT=${CACHE_ROOT:-/inspire/qb-ilm2/project/26summer-camp-11/26220077/hf_cache}
+mkdir -p "$CACHE_ROOT/huggingface" "$CACHE_ROOT/lerobot" 2>/dev/null || true
+export HF_HOME=${HF_HOME:-$CACHE_ROOT/huggingface}
+export HF_DATASETS_CACHE=${HF_DATASETS_CACHE:-$HF_HOME/datasets}
+export HF_LEROBOT_HOME=${HF_LEROBOT_HOME:-$CACHE_ROOT/lerobot}
+export TORCHRUN_LOG_DIR=${TORCHRUN_LOG_DIR:-./train_out/torchrun_logs}
+
 ## node setting
 num_gpu=${NGPU}
 master_port=${MASTER_PORT}

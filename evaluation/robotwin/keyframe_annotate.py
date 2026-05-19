@@ -202,10 +202,40 @@ def main():
                     help="meta/<file> to read (use episodes_ori.jsonl for the "
                          "finer multi-stage segmentation).")
     ap.add_argument("--out-name", default="keyframes.jsonl")
+    ap.add_argument("--recursive", action="store_true",
+                    help="Treat --dataset as a PARENT dir (e.g. a curated "
+                         "symlink set) and annotate every task dir under it "
+                         "that has meta/<episodes-file>. Needed for "
+                         "multi-task training (kf_aux requires a "
+                         "keyframes.jsonl per task).")
     args = ap.parse_args()
-    annotate_dataset(Path(args.dataset), tuple(args.gripper_idx),
-                     args.with_stage_boundaries, args.out_name,
-                     args.episodes_file)
+
+    root = Path(args.dataset)
+    if args.recursive:
+        # find every dir with meta/<episodes-file> (follow symlinks so a
+        # *_stable symlink dir works); annotate each.
+        targets = []
+        for dp, _dn, _fn in os.walk(root, followlinks=True):
+            if (Path(dp) / "meta" / args.episodes_file).exists():
+                targets.append(Path(dp))
+        targets = sorted(set(targets))
+        if not targets:
+            raise SystemExit(
+                f"--recursive: no task dir with meta/{args.episodes_file} "
+                f"under {root}")
+        print(f"[keyframe_annotate] recursive: {len(targets)} task dirs")
+        for i, t in enumerate(targets):
+            print(f"[keyframe_annotate] ({i+1}/{len(targets)}) {t}")
+            try:
+                annotate_dataset(t, tuple(args.gripper_idx),
+                                 args.with_stage_boundaries, args.out_name,
+                                 args.episodes_file)
+            except Exception as e:  # noqa: BLE001
+                print(f"[keyframe_annotate] SKIP {t}: {e}")
+    else:
+        annotate_dataset(root, tuple(args.gripper_idx),
+                         args.with_stage_boundaries, args.out_name,
+                         args.episodes_file)
 
 
 if __name__ == "__main__":

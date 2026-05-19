@@ -24,7 +24,7 @@ va_robotwin_train_cfg.wandb_mode = 'offline'
 va_robotwin_train_cfg.wandb_dir = os.path.join(
     va_robotwin_train_cfg.save_root, 'wandb')
 va_robotwin_train_cfg.load_worker = 16
-va_robotwin_train_cfg.save_interval = 1000
+va_robotwin_train_cfg.save_interval = 200
 va_robotwin_train_cfg.gc_interval = 50
 va_robotwin_train_cfg.cfg_prob = 0.1
 

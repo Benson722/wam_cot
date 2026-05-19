@@ -19,7 +19,10 @@ from lerobot.constants import HF_LEROBOT_HOME
 def recursive_find_file(directory, filename='info.json'):
     result = []
     try:
-        for root, dirs, files in os.walk(directory):
+        # followlinks=True so a curated dir of SYMLINKS to task dirs
+        # (e.g. lerobot_robotwin_eef_aug_500_stable/) is traversed —
+        # os.walk skips symlinked dirs by default, which would yield 0 repos.
+        for root, dirs, files in os.walk(directory, followlinks=True):
             if filename in files:
                 full_path = os.path.join(root, filename)
                 result.append(full_path)
@@ -48,20 +51,14 @@ def construct_lerobot_multi_processor(config,
     )
     repo_list = recursive_find_file(config.dataset_path, 'info.json')
     repo_list = [v.split('/meta/info.json')[0] for v in repo_list]
-    # NEVER spawn more workers than repos. Crucially, multiprocessing.Pool
-    # forks workers; doing that AFTER the transformer is on CUDA and
-    # NCCL/FSDP are initialized deadlocks (CUDA/NCCL are not fork-safe) —
-    # the default num_init_worker=128 forked 128 procs even for ONE repo
-    # and hung at "Setting up datasets...". For a single repo build it
-    # serially in-process (no fork at all); only use a Pool for genuine
-    # multi-repo parallelism, capped to len(repo_list).
-    n_workers = max(1, min(int(num_init_worker), len(repo_list)))
-    if n_workers <= 1:
-        datasets_out_lst = [construct_func(r) for r in repo_list]
-    else:
-        with Pool(n_workers) as pool:
-            datasets_out_lst = pool.map(construct_func, repo_list)
-
+    # ALWAYS build serially in-process — NO multiprocessing.Pool. Pool forks
+    # workers; forking AFTER the transformer is on CUDA + NCCL/FSDP are
+    # initialized deadlocks (CUDA/NCCL are not fork-safe). This bit us with
+    # the default num_init_worker=128 even for ONE repo; with N task dirs
+    # (multi-task training) Pool(N) would re-introduce the same hang. Each
+    # repo's dataset is just metadata/latent-index construction (one-time,
+    # tens of seconds even for ~12 tasks), so serial is the robust choice.
+    datasets_out_lst = [construct_func(r) for r in repo_list]
     return datasets_out_lst
 
 def get_relative_pose(pose):
@@ -228,8 +225,16 @@ class LatentLeRobotDataset(LeRobotDataset):
                 d = json.loads(line)
                 self._kf_map[int(d["episode_index"])] = np.asarray(
                     sorted(int(x) for x in d["keyframes"]), dtype=np.int64)
-        print(f"[kf_aux] loaded keyframes for {len(self._kf_map)} episodes "
-              f"from {fp}")
+        # Only the main process logs — each DataLoader worker (load_worker)
+        # × rank re-runs this lazily and would otherwise flood the log.
+        try:
+            from torch.utils.data import get_worker_info
+            _is_worker = get_worker_info() is not None
+        except Exception:  # noqa: BLE001
+            _is_worker = False
+        if not _is_worker:
+            print(f"[kf_aux] loaded keyframes for {len(self._kf_map)} "
+                  f"episodes from {fp}")
         return self._kf_map
 
     def _get_global_idx(self, episode_index: int, local_index: int):
