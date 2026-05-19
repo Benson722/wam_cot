@@ -50,14 +50,29 @@ frames. A stage is a coherent sub-phase (e.g. "approach object", "grasp", \
 "lift / move", "place", "retract").
 
 ABSOLUTE OUTPUT RULES (a parser reads your reply with json.loads):
-- Output ONE JSON object and NOTHING else. No analysis, no explanation, \
-no markdown fences, no per-frame description, no prose before or after.
+- Output ONE JSON object and NOTHING else. NO analysis. NO explanation. \
+NO markdown. NO per-frame description. NO "Stage 1:" prose. NO "Let's \
+think". NO sentences. The ENTIRE reply is the JSON.
 - Your VERY FIRST output character MUST be '{' and the VERY LAST MUST \
 be '}'.
 - Schema EXACTLY: {"stages":[{"name":"<<=4 words>","start_frame":<int>}]}
 - 2-6 stages. start_frame strictly increasing, in [0, length). The \
 first stage MUST have start_frame 0.
-Think silently; reveal only the JSON."""
+Decide silently in your head; emit only the JSON. Replies containing any \
+non-JSON text are rejected."""
+
+# One in-context demonstration: shows the assistant turn is PURE JSON with
+# zero reasoning, regardless of content. A stubborn CoT model imitates the
+# demonstrated brevity far more than it obeys instructions.
+_FEWSHOT_USER = ("TASK: pick up the red cup with the right arm\n"
+                 "EPISODE LENGTH (frames): 120\n"
+                 "The 4 images are frames at indices [0, 40, 80, 119] "
+                 "(chronological).")
+_FEWSHOT_ASSISTANT = ('{"stages": [{"name": "approach cup", '
+                      '"start_frame": 0}, {"name": "grasp", '
+                      '"start_frame": 38}, {"name": "lift", '
+                      '"start_frame": 70}, {"name": "retract", '
+                      '"start_frame": 100}]}')
 
 
 def _episodes(meta_dir: Path, episodes_file: str):
@@ -237,6 +252,8 @@ def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
         content.append({"type": "image_url",
                         "image_url": {"url": _img_to_data_url(fr_img)}})
     messages = [{"role": "system", "content": _SYS},
+                {"role": "user", "content": _FEWSHOT_USER},
+                {"role": "assistant", "content": _FEWSHOT_ASSISTANT},
                 {"role": "user", "content": content}]
     if prefill:
         # put words in the model's mouth so it continues a JSON array
@@ -348,10 +365,16 @@ def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
     print(f"[probe] VLM replied in {time.time()-tc:.1f}s", flush=True)
     msg = (resp.get("choices") or [{}])[0].get("message", {})
     fin = (resp.get("choices") or [{}])[0].get("finish_reason")
+    usage = resp.get("usage") or {}
+    ctok = int(usage.get("completion_tokens", 0))
+    truncated = ctok >= max_tokens
     print("[probe] --- raw server message keys:", list(msg.keys()))
-    print(f"[probe] --- finish_reason: {fin}  (length => still essaying / "
-          "raise --max-tokens or use --prefill)")
-    print("[probe] --- usage:", resp.get("usage"))
+    print(f"[probe] --- finish_reason: {fin}  (UNRELIABLE on this server)")
+    print(f"[probe] --- usage: {usage}")
+    print(f"[probe] --- TRUNCATED={truncated}  (completion_tokens {ctok} "
+          f"{'==' if truncated else '<'} max_tokens {max_tokens}); "
+          + ("STILL essaying -> raise --max-tokens" if truncated else
+             "model stopped on its own -> if no JSON it just won't comply"))
     print(f"[probe] --- extracted text: {len(txt)} chars")
     print("[probe] --- HEAD (first 500):\n" + txt[:500])
     print("[probe] --- TAIL (last 500) -- the JSON should be HERE:\n"
