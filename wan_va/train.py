@@ -3,7 +3,11 @@ import argparse
 import os
 import sys
 from pathlib import Path
-import wandb
+# NOTE: wandb is imported LAZILY inside Trainer.__init__ only when
+# config.enable_wandb is True. The repo's README installs wandb with
+# `--no-deps`, so a top-level `import wandb` crashes on missing `click`
+# even when wandb is disabled. Keep it lazy so enable_wandb=False needs
+# no wandb/click at all.
 
 import torch
 import torch.distributed as dist
@@ -50,6 +54,7 @@ import gc
 class Trainer:
     def __init__(self, config):
         if config.enable_wandb and config.rank == 0:
+            import wandb  # lazy: only needed when wandb is actually enabled
             wandb.login(host=os.environ['WANDB_BASE_URL'], key=os.environ['WANDB_API_KEY'])
             self.wandb = wandb
             self.wandb.init(
