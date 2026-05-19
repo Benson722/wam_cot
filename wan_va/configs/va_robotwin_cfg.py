@@ -1,4 +1,6 @@
 # Copyright 2024-2025 The Robbyant Team Authors. All rights reserved.
+import os
+
 from easydict import EasyDict
 
 from .shared_config import va_shared_cfg
@@ -21,9 +23,19 @@ va_robotwin_cfg.update(va_shared_cfg)
 #   ln -sfn $BS/tokenizer $CK/tokenizer
 #   ln -sfn $BS/text_encoder $CK/text_encoder
 #
-# NOTE: robotwin_train inherits this (va_robotwin_train_cfg .update()s this
-# cfg). To RESUME TRAINING from the original base, restore the BASE path.
-va_robotwin_cfg.wan22_pretrained_model_name_or_path = "/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/train_out/checkpoints/checkpoint_step_1200"
+# NOTE: robotwin_train pins its OWN base in va_robotwin_train_cfg.py, so
+# changing this (or VA_EVAL_CKPT) only affects inference/serving, never
+# training.
+#
+# For the online SR ablation, switch the served ckpt WITHOUT editing this
+# file: export VA_EVAL_CKPT=<ckpt_dir> before launch_server.sh. Each dir
+# must be self-contained (transformer/ + vae/ tokenizer/ text_encoder/ —
+# symlink the 3 from BASE for train.py checkpoints; the BASE itself already
+# has all 4).
+_VA_EVAL_DEFAULT = ("/inspire/hdd/project/26summer-camp-11/26220077/"
+                    "lingbot-va/train_out/checkpoints/checkpoint_step_1200")
+va_robotwin_cfg.wan22_pretrained_model_name_or_path = os.environ.get(
+    "VA_EVAL_CKPT", _VA_EVAL_DEFAULT)
 
 va_robotwin_cfg.attn_window = 72
 va_robotwin_cfg.frame_chunk_size = 2
