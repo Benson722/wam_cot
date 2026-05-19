@@ -610,7 +610,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                  eps=1e-06,
                  rope_max_seq_len=1024,
                  pos_embed_seq_len=None,
-                 attn_mode="torch"):
+                 attn_mode="torch",
+                 vlm_num_stages=8):
         r"""
         TODO
         """
@@ -658,6 +659,16 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         # config sets kf_aux=True & kf_aux_weight>0 — inference never calls it.
         self.kf_aux_head = nn.Sequential(
             nn.Linear(inner_dim, 128), nn.GELU(), nn.Linear(128, 1))
+
+        # Latent-CoT Phase B: VLM semantic-stage classification head on the
+        # SAME pooled backbone hidden. Supervised (CE) by Qwen-derived
+        # ordered stages -> richer implicit-CoT signal than kf-distance.
+        # Always built (tiny); load_transformer materializes it from meta;
+        # used/optimized only when cfg.vlm_stage_aux & weight>0.
+        self.vlm_num_stages = int(vlm_num_stages)
+        self.stage_head = nn.Sequential(
+            nn.Linear(inner_dim, 128), nn.GELU(),
+            nn.Linear(128, self.vlm_num_stages))
 
     def clear_cache(self, cache_name):
         for block in self.blocks:
@@ -803,6 +814,7 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         kf_feat = rearrange(latent_hidden_states, '1 (b f s) d -> b f s d',
                             b=batch_size, f=f_lat).mean(dim=2)
         kf_pred = self.kf_aux_head(kf_feat).squeeze(-1)  # [B, f_lat]
+        stage_pred = self.stage_head(kf_feat)            # [B, f_lat, S]
 
         latent_hidden_states = self.proj_out(latent_hidden_states)
         latent_hidden_states = rearrange(latent_hidden_states,
@@ -816,7 +828,8 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
         # kf_feat ([B, F_lat, inner_dim]) is the pre-head backbone hidden,
         # exposed for the #4 latent-probing script (train.py's compute_loss
         # only reads pred[0:3], so the extra element is ignored there).
-        return latent_hidden_states, action_hidden_states, kf_pred, kf_feat
+        return (latent_hidden_states, action_hidden_states, kf_pred,
+                kf_feat, stage_pred)
 
     def forward(
         self,

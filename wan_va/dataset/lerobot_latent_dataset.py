@@ -260,6 +260,43 @@ class LatentLeRobotDataset(LeRobotDataset):
                   f"episodes from {fp}")
         return self._kf_map
 
+    def _load_stages(self):
+        """Lazy {episode_index: sorted np.int64[stage start_frame]} from
+        meta/<vlm_stage_file> (Phase A Qwen output). Empty unless
+        cfg.vlm_stage_aux & file present -> training effect is zero."""
+        if hasattr(self, "_stage_map"):
+            return self._stage_map
+        self._stage_map = {}
+        if not getattr(self.config, "vlm_stage_aux", False):
+            return self._stage_map
+        fp = Path(self.latent_path).parent / "meta" / getattr(
+            self.config, "vlm_stage_file", "stages.jsonl")
+        if not os.path.exists(fp):
+            print(f"[vlm_stage] {fp} not found; stage aux all-masked "
+                  f"(no effect). Run qwen_stage_annotate.py first.")
+            return self._stage_map
+        with open(fp, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                d = json.loads(line)
+                starts = sorted(int(s["start_frame"])
+                                for s in d.get("stages", [])
+                                if isinstance(s, dict))
+                if starts:
+                    self._stage_map[int(d["episode_index"])] = np.asarray(
+                        starts, dtype=np.int64)
+        try:
+            from torch.utils.data import get_worker_info
+            _w = get_worker_info() is not None
+        except Exception:  # noqa: BLE001
+            _w = False
+        if not _w:
+            print(f"[vlm_stage] loaded stages for {len(self._stage_map)} "
+                  f"episodes from {fp}")
+        return self._stage_map
+
     def _get_global_idx(self, episode_index: int, local_index: int):
         ep_start = self.episode_data_index["from"][episode_index]
         return local_index + ep_start
@@ -407,6 +444,24 @@ class LatentLeRobotDataset(LeRobotDataset):
             # episode id for trajectory-safe train/val split in #4 probing
             out_dict['kf_episode'] = torch.tensor(int(episode_index),
                                                   dtype=torch.int64)
+
+        # Phase B: per-latent-frame VLM semantic stage idx (CE target;
+        # -1 = ignore). Same latent-timestep alignment as kf_*. Opt-in.
+        if getattr(self.config, "vlm_stage_aux", False):
+            smap = self._load_stages()
+            sf = np.asarray(latent_frame_ids, dtype=np.int64).reshape(-1)
+            lat_ns = (len(sf) - 1) // 4 + 1
+            S = int(getattr(self.config, "vlm_num_stages", 8))
+            starts = smap.get(int(episode_index))
+            vstage = np.full(lat_ns, -1, dtype=np.int64)
+            if starts is not None and starts.size > 0:
+                for i in range(lat_ns):
+                    rep = int(sf[min(i * 4, len(sf) - 1)])
+                    # stage = #starts with start_frame <= rep, minus 1
+                    si = int((starts <= rep).sum()) - 1
+                    if si >= 0:
+                        vstage[i] = min(si, S - 1)
+            out_dict['vlm_stage'] = torch.from_numpy(vstage)
         return out_dict
 
     def __len__(self):

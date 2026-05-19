@@ -50,10 +50,36 @@ from utils import (
 
 from dataset import MultiLatentLeRobotDataset
 import gc
+import time
+
+
+def build_exp_tag(config):
+    """Derive a checkpoint/wandb tag that NAMES the training objective so
+    multiple runs (baseline vs Latent-CoT #1 vs +VLM-stage) stay
+    distinguishable on disk. Honor an explicit cfg.exp_name; else auto-build
+    from the active aux objectives:
+      robotwin_baseline                      (no aux)
+      robotwin_kf0.1                         (#1 only)
+      robotwin_kf0.1_vlmstage0.1             (#1 + Phase B)
+    """
+    explicit = getattr(config, 'exp_name', None)
+    if explicit:
+        return str(explicit)
+    parts = []
+    if (getattr(config, 'kf_aux', False)
+            and float(getattr(config, 'kf_aux_weight', 0.0)) > 0.0):
+        parts.append(f"kf{float(config.kf_aux_weight):g}")
+    if (getattr(config, 'vlm_stage_aux', False)
+            and float(getattr(config, 'vlm_stage_weight', 0.0)) > 0.0):
+        parts.append(f"vlmstage{float(config.vlm_stage_weight):g}")
+    return "robotwin_" + ("_".join(parts) if parts else "baseline")
 
 
 class Trainer:
     def __init__(self, config):
+        # Objective tag: names checkpoint dir + wandb run so training
+        # targets are never confused later (see build_exp_tag).
+        self.exp_tag = build_exp_tag(config)
         if config.enable_wandb and config.rank == 0:
             # OFFLINE-FIRST wandb: log to local disk, NO login / NO network.
             # `wandb sync <wandb_dir>/wandb/offline-run-*` to upload later.
@@ -97,7 +123,7 @@ class Trainer:
                     config=config,
                     mode=wb_mode,
                     dir=wb_dir,
-                    name='test_lln',
+                    name=self.exp_tag,
                 )
                 logger.info(
                     f"WandB enabled (mode={wb_mode}, dir={wb_dir}). "
@@ -185,8 +211,13 @@ class Trainer:
         self.train_scheduler_action = FlowMatchScheduler(shift=self.config.action_snr_shift, sigma_min=0.0, extra_one_step=True)
         self.train_scheduler_action.set_timesteps(1000, training=True)
 
-        self.save_dir = Path(config.save_root) / "checkpoints"
+        # checkpoints/<exp_tag>/ -> the folder name states the objective
+        # (e.g. robotwin_kf0.1_vlmstage0.1) so runs are never confused.
+        self.save_dir = Path(config.save_root) / "checkpoints" / self.exp_tag
         self.save_dir.mkdir(parents=True, exist_ok=True)
+        if config.rank == 0:
+            logger.info(f"Checkpoints -> {self.save_dir} "
+                        f"(objective tag: {self.exp_tag})")
 
         self.gradient_accumulation_steps = getattr(config, 'gradient_accumulation_steps', 1)
         self.train_loader_iter = None
@@ -294,6 +325,7 @@ class Trainer:
         # didn't add them, i.e. cfg.kf_aux off -> loss term is skipped).
         input_dict['kf_dist'] = batch_dict.get('kf_dist')
         input_dict['kf_mask'] = batch_dict.get('kf_mask')
+        input_dict['vlm_stage'] = batch_dict.get('vlm_stage')  # Phase B
         return input_dict
 
     def convert_input_format(self, input_dict):
@@ -307,7 +339,8 @@ class Trainer:
         pred
     ):
         latent_pred, action_pred = pred[0], pred[1]
-        kf_pred = pred[2] if len(pred) > 2 else None  # Latent-CoT #1
+        kf_pred = pred[2] if len(pred) > 2 else None     # Latent-CoT #1
+        stage_pred = pred[4] if len(pred) > 4 else None  # Phase B (VLM)
         action_pred = rearrange(action_pred, 'b (f n) c -> b c f n 1', f=input_dict['action_dict']['targets'].shape[-3])
         latent_pred = data_seq_to_patch(
                         self.patch_size, latent_pred,
@@ -364,8 +397,26 @@ class Trainer:
             kf_loss = per.sum() / (m.sum() + 1e-6)
             kf_loss = kf_loss * float(cfg.kf_aux_weight)
 
+        # ---- Phase B: VLM semantic-stage CE loss ------------------------
+        # Strict no-op unless cfg.vlm_stage_aux & weight>0 AND the dataset
+        # supplied vlm_stage. CE over [B,F_lat,S], ignore_index=-1.
+        stage_loss = torch.zeros((), device=action_pred.device,
+                                 dtype=torch.float32)
+        if (getattr(cfg, 'vlm_stage_aux', False)
+                and float(getattr(cfg, 'vlm_stage_weight', 0.0)) > 0.0
+                and stage_pred is not None
+                and input_dict.get('vlm_stage') is not None):
+            vst = input_dict['vlm_stage'].to(stage_pred.device).long()
+            n = min(stage_pred.shape[1], vst.shape[-1])
+            sp = stage_pred[:, :n].reshape(-1, stage_pred.shape[-1]).float()
+            st = vst[..., :n].reshape(-1)
+            if (st >= 0).any():
+                stage_loss = F.cross_entropy(sp, st, ignore_index=-1)
+                stage_loss = stage_loss * float(cfg.vlm_stage_weight)
+
         gas = self.gradient_accumulation_steps
-        return latent_loss / gas, action_loss / gas, kf_loss / gas
+        return (latent_loss / gas, action_loss / gas, kf_loss / gas,
+                stage_loss / gas)
 
     def _train_step(self, batch, batch_idx):
         """Train a single batch, returns losses for logging."""
@@ -380,14 +431,16 @@ class Trainer:
             self.transformer.set_requires_gradient_sync(True)
 
         output = self.transformer(input_dict, train_mode=True)
-        latent_loss, action_loss, kf_loss = self.compute_loss(input_dict, output)
-        loss = latent_loss + action_loss + kf_loss
+        latent_loss, action_loss, kf_loss, stage_loss = self.compute_loss(
+            input_dict, output)
+        loss = latent_loss + action_loss + kf_loss + stage_loss
 
         loss.backward()
 
         losses = {'latent_loss': latent_loss.detach(),
                   'action_loss': action_loss.detach(),
-                  'kf_loss': kf_loss.detach()}
+                  'kf_loss': kf_loss.detach(),
+                  'stage_loss': stage_loss.detach()}
         
         # Only update weights after accumulating gradients
         if should_sync:
@@ -438,6 +491,33 @@ class Trainer:
                 config_dict.pop('_name_or_path', None)
                 with open(config_file, 'w') as f:
                     json.dump(config_dict, f, indent=2)
+
+                # Objective manifest: makes the run self-describing even if
+                # the folder is moved/renamed (which aux heads, weights,
+                # base ckpt, dataset, step).
+                cfg = self.config
+                meta = {
+                    'exp_tag': self.exp_tag,
+                    'step': self.step,
+                    'num_steps': getattr(cfg, 'num_steps', None),
+                    'base_ckpt': getattr(
+                        cfg, 'wan22_pretrained_model_name_or_path', None),
+                    'dataset_path': getattr(cfg, 'dataset_path', None),
+                    'kf_aux': bool(getattr(cfg, 'kf_aux', False)),
+                    'kf_aux_weight': float(getattr(cfg, 'kf_aux_weight', 0.0)),
+                    'kf_file': getattr(cfg, 'kf_file', None),
+                    'vlm_stage_aux': bool(
+                        getattr(cfg, 'vlm_stage_aux', False)),
+                    'vlm_stage_weight': float(
+                        getattr(cfg, 'vlm_stage_weight', 0.0)),
+                    'vlm_stage_file': getattr(cfg, 'vlm_stage_file', None),
+                    'vlm_num_stages': int(
+                        getattr(cfg, 'vlm_num_stages', 0)),
+                    'learning_rate': getattr(cfg, 'learning_rate', None),
+                    'timestamp': time.strftime('%Y-%m-%d %H:%M:%S'),
+                }
+                with open(checkpoint_dir / "meta.json", 'w') as f:
+                    json.dump(meta, f, indent=2)
 
                 # # Save optimizer state and training metadata in PyTorch format
                 # training_state_path = checkpoint_dir / "training_state.pt"
@@ -585,6 +665,7 @@ class Trainer:
         accumulated_latent_losses = []
         accumulated_action_losses = []
         accumulated_kf_losses = []          # Latent-CoT #1 visibility
+        accumulated_stage_losses = []       # Phase B (VLM stage) visibility
         step_in_accumulation = 0
 
         while self.step < self.config.num_steps:
@@ -597,6 +678,7 @@ class Trainer:
             accumulated_latent_losses.append(losses['latent_loss'])
             accumulated_action_losses.append(losses['action_loss'])
             accumulated_kf_losses.append(losses['kf_loss'])
+            accumulated_stage_losses.append(losses['stage_loss'])
             step_in_accumulation += 1
 
             # Log and checkpoint when optimizer steps
@@ -609,11 +691,13 @@ class Trainer:
                 max_latent_loss_show = dist_max(torch.stack(accumulated_latent_losses).sum()).detach().cpu().item()
                 max_action_loss_show = dist_max(torch.stack(accumulated_action_losses).sum()).detach().cpu().item()
                 kf_loss_show = dist_mean(torch.stack(accumulated_kf_losses).sum()).detach().cpu().item()
+                stage_loss_show = dist_mean(torch.stack(accumulated_stage_losses).sum()).detach().cpu().item()
 
                 # Clear accumulated losses
                 accumulated_latent_losses = []
                 accumulated_action_losses = []
                 accumulated_kf_losses = []
+                accumulated_stage_losses = []
                 step_in_accumulation = 0
 
                 torch.cuda.synchronize()
@@ -628,6 +712,7 @@ class Trainer:
                         'latent_loss': f'{latent_loss_show:.4f}',
                         'action_loss': f'{action_loss_show:.4f}',
                         'kf_loss': f'{kf_loss_show:.4f}',
+                        'stage_loss': f'{stage_loss_show:.4f}',
                         'step': self.step,
                         'grad_norm': f'{total_norm.item():.2f}',
                         'lr': f'{lr:.2e}'
@@ -639,6 +724,7 @@ class Trainer:
                             'loss_metrics/global_max_video_loss': max_latent_loss_show,
                             'loss_metrics/global_max_action_loss': max_action_loss_show,
                             'loss_metrics/global_avg_kf_loss': kf_loss_show,
+                            'loss_metrics/global_avg_stage_loss': stage_loss_show,
                             'grad_norm': total_norm.item(),
                             'lr': lr,
                         }, step=self.step)

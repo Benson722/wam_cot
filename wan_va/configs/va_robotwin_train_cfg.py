@@ -56,3 +56,21 @@ va_robotwin_train_cfg.num_steps = 50000
 va_robotwin_train_cfg.kf_aux = True
 va_robotwin_train_cfg.kf_aux_weight = 0.1
 va_robotwin_train_cfg.kf_file = 'keyframes.jsonl'
+
+# ---- Latent-CoT Phase B: VLM (Qwen3.5-27B) semantic-stage aux head ------
+# Richer implicit-CoT supervision than the gripper-time kf head: a
+# stage-classification head (CE) on the same backbone hidden, supervised by
+# VLM-derived ordered stages. Prereq (Phase A):
+#   python evaluation/robotwin/qwen_stage_annotate.py --dataset <ds>
+#   --recursive  -> writes <ds>/meta/<vlm_stage_file> per task
+# vlm_num_stages = max stage classes (idx clipped to [0, S-1], -1=ignored).
+# Set vlm_stage_aux=False / vlm_stage_weight=0 for a pure no-op.
+va_robotwin_train_cfg.vlm_stage_aux = True
+va_robotwin_train_cfg.vlm_stage_weight = 0.1
+va_robotwin_train_cfg.vlm_stage_file = 'stages.jsonl'
+va_robotwin_train_cfg.vlm_num_stages = 8
+
+# ---- Experiment tag: checkpoints/wandb folders MUST name the objective ---
+# so multiple training targets stay distinguishable. None -> auto-derived
+# from the active aux objectives (e.g. robotwin_kf0.1_vlmstage0.1).
+va_robotwin_train_cfg.exp_name = None
