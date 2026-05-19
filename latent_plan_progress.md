@@ -94,11 +94,28 @@ py_compile 全通过；标注核心逻辑本地单测通过。
 **#1 数据跑通 → #1 模型侧训练 → #4 probing 量化 latent 是否编码 stage →
 再决定 #2/#3/#5**。
 
-## #4 probing
+## ✅ #4 probing (z_t 离线基线已落地、可立即跑；h_t 钩子已留)
 
-待 #1 模型侧训出 ckpt 后做（依赖训练产物 + stage 标签；stage 标签可用
-`keyframe_annotate.py --with-stage-boundaries` 的 `stage` 类型，或 deepseek
-阶段标注，二者交叉验证，见 latent_plan.md "风险点 1"）。
+- loader 在 kf 钩子里追加 `kf_stage`（每 latent frame 已过关键帧数 = 阶段
+  idx）与 `kf_episode`（轨迹安全 split 用），同 `cfg.kf_aux` 守卫。
+- `model.py::forward_train` 现额外返回 `kf_feat`（pre-head 主干隐状态，
+  4th 元素；`compute_loss` 只读 pred[0:3]，无副作用）→ 供日后 `h_t` probe。
+- `evaluation/robotwin/latent_probe.py`：
+  - `--features z_latent`（默认，**零 GPU/模型依赖、可立即跑**）：对 Wan-VAE
+    latent 做空间 mean-pool → 每 latent frame `[C]`，按 `kf_stage` 训线性
+    探针；**按 episode 轨迹切分** train/val（防 plan 风险 #2 的泄漏）；
+    输出 `results_*.json`（val_acc / chance / 每类 acc / 混淆矩阵）+
+    `tsne_*.png`（sklearn t-SNE，缺失则 torch PCA-2D 回退）+ probe 权重。
+  - `--features h_hidden`：保留（`forward_train` 已暴露 `kf_feat`），待 #1
+    训出 ckpt 后做 stock-vs-#1 对比，当前主动 NotImplementedError 指引。
+- 运行: `python evaluation/robotwin/latent_probe.py --config robotwin_train
+  --num-samples 400 --out-dir experiments/probing`
+- **预期/解读**：`adjust_bottle` 仅 2 阶段（grasp 前/后）→ chance=0.50。
+  val_acc 显著 >0.5（如 >0.65）= 即便 stock 表征，VAE latent 已线性可分
+  manipulation 阶段（隐式物理编码的弱证据/基线）；接近 0.5 = 不可分。
+  强 probing 需多/长程任务（更多关键帧→更多阶段，chance 更低更有区分度）。
+  z_t 是"喂给世界模型的表征"基线；h_t（主干隐状态）+#1 训练后的提升才是
+  计划要的核心对比。
 
 ---
 

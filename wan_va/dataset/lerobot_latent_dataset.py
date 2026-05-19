@@ -349,6 +349,11 @@ class LatentLeRobotDataset(LeRobotDataset):
             kfs = kf_map.get(int(episode_index))
             dist = np.zeros(lat_n, dtype=np.float32)
             mask = np.zeros(lat_n, dtype=bool)
+            # stage_idx[t] = #keyframes already passed strictly before the
+            # representative raw frame -> 0 before 1st keyframe, 1 after it,
+            # ... (for adjust_bottle: 0=pre-grasp, 1=post-grasp). Used by the
+            # #4 probing script as the per-latent-frame stage label.
+            stage = np.zeros(lat_n, dtype=np.int64)
             if kfs is not None and kfs.size > 0:
                 for i in range(lat_n):
                     rep = int(fids[min(i * 4, len(fids) - 1)])
@@ -356,8 +361,13 @@ class LatentLeRobotDataset(LeRobotDataset):
                     if nxt.size > 0:
                         dist[i] = float(nxt[0] - rep)
                         mask[i] = True
+                    stage[i] = int((kfs < rep).sum())
             out_dict['kf_dist'] = torch.from_numpy(dist)
             out_dict['kf_mask'] = torch.from_numpy(mask)
+            out_dict['kf_stage'] = torch.from_numpy(stage)
+            # episode id for trajectory-safe train/val split in #4 probing
+            out_dict['kf_episode'] = torch.tensor(int(episode_index),
+                                                  dtype=torch.int64)
         return out_dict
 
     def __len__(self):

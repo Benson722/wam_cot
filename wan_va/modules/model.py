@@ -813,7 +813,10 @@ class WanTransformer3DModel(ModelMixin, ConfigMixin):
                                              '1 (b l) c -> b l c',
                                              b=batch_size)  #
 
-        return latent_hidden_states, action_hidden_states, kf_pred
+        # kf_feat ([B, F_lat, inner_dim]) is the pre-head backbone hidden,
+        # exposed for the #4 latent-probing script (train.py's compute_loss
+        # only reads pred[0:3], so the extra element is ignored there).
+        return latent_hidden_states, action_hidden_states, kf_pred, kf_feat
 
     def forward(
         self,
