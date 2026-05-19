@@ -510,6 +510,7 @@ class Trainer:
         self.optimizer.zero_grad()
         accumulated_latent_losses = []
         accumulated_action_losses = []
+        accumulated_kf_losses = []          # Latent-CoT #1 visibility
         step_in_accumulation = 0
 
         while self.step < self.config.num_steps:
@@ -521,6 +522,7 @@ class Trainer:
             # Accumulate losses for logging
             accumulated_latent_losses.append(losses['latent_loss'])
             accumulated_action_losses.append(losses['action_loss'])
+            accumulated_kf_losses.append(losses['kf_loss'])
             step_in_accumulation += 1
 
             # Log and checkpoint when optimizer steps
@@ -532,10 +534,12 @@ class Trainer:
                 action_loss_show = dist_mean(torch.stack(accumulated_action_losses).sum()).detach().cpu().item()
                 max_latent_loss_show = dist_max(torch.stack(accumulated_latent_losses).sum()).detach().cpu().item()
                 max_action_loss_show = dist_max(torch.stack(accumulated_action_losses).sum()).detach().cpu().item()
+                kf_loss_show = dist_mean(torch.stack(accumulated_kf_losses).sum()).detach().cpu().item()
 
                 # Clear accumulated losses
                 accumulated_latent_losses = []
                 accumulated_action_losses = []
+                accumulated_kf_losses = []
                 step_in_accumulation = 0
 
                 torch.cuda.synchronize()
@@ -549,6 +553,7 @@ class Trainer:
                     progress_bar.set_postfix({
                         'latent_loss': f'{latent_loss_show:.4f}',
                         'action_loss': f'{action_loss_show:.4f}',
+                        'kf_loss': f'{kf_loss_show:.4f}',
                         'step': self.step,
                         'grad_norm': f'{total_norm.item():.2f}',
                         'lr': f'{lr:.2e}'
@@ -559,6 +564,7 @@ class Trainer:
                             'loss_metrics/global_avg_action_loss': action_loss_show,
                             'loss_metrics/global_max_video_loss': max_latent_loss_show,
                             'loss_metrics/global_max_action_loss': max_action_loss_show,
+                            'loss_metrics/global_avg_kf_loss': kf_loss_show,
                             'grad_norm': total_norm.item(),
                             'lr': lr,
                         }, step=self.step)
