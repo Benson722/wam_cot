@@ -232,6 +232,9 @@ def main():
                     help="latents/<cam> to probe (else cfg.obs_cam_keys[0])")
     ap.add_argument("--features", choices=["z_latent", "h_hidden"],
                     default="z_latent")
+    ap.add_argument("--hidden-dump", default=None,
+                    help="(h_hidden) .pt produced by `wan_va.train "
+                         "--probe-collect` for the ckpt to probe")
     ap.add_argument("--num-samples", type=int, default=400,
                     help="cap on .pth segments scanned (0 = all)")
     ap.add_argument("--epochs", type=int, default=50)
@@ -241,25 +244,35 @@ def main():
     args = ap.parse_args()
 
     if args.features == "h_hidden":
-        raise NotImplementedError(
-            "h_hidden probe needs a model forward; forward_train already "
-            "exposes it as pred[3] (kf_feat). Implement once a #1-trained "
-            "ckpt exists (stock-vs-#1 comparison). Use --features z_latent "
-            "for the offline baseline now.")
+        # Backbone hidden h_t dump produced by:
+        #   python -m wan_va.train --config-name robotwin_train \
+        #       --probe-ckpt <ckpt_dir> --probe-collect <out.pt>
+        if not args.hidden_dump or not os.path.isfile(args.hidden_dump):
+            raise SystemExit(
+                "h_hidden needs --hidden-dump <file> from "
+                "`wan_va.train --probe-collect`. Run that for the STOCK "
+                "ckpt and the #1 ckpt, then probe each dump.")
+        import torch
+        d = torch.load(args.hidden_dump, map_location="cpu",
+                        weights_only=False)
+        X = np.asarray(d["feat"], dtype=np.float32)
+        y = np.asarray(d["stage"], dtype=np.int64)
+        g = np.asarray(d["episode"], dtype=np.int64)
+        print(f"[probe] h_hidden dump={args.hidden_dump} "
+              f"ckpt={d.get('ckpt','?')}")
+    else:
+        # NOTE: configs are pure easydict (no lerobot in the import chain);
+        # the z_latent probe reads .pth latents directly, so lerobot is NOT
+        # required here (only model TRAINING needs it).
+        from wan_va.configs import VA_CONFIGS
 
-    # NOTE: configs are pure easydict (no lerobot in the import chain);
-    # the z_latent probe reads .pth latents directly, so lerobot is NOT
-    # required here (only model TRAINING needs it).
-    from wan_va.configs import VA_CONFIGS
-
-    cfg = VA_CONFIGS[args.config]
-    dataset_root = args.dataset or cfg.dataset_path
-    cam_key = args.cam_key or cfg.obs_cam_keys[0]
-    kf_file = getattr(cfg, "kf_file", "keyframes.jsonl")
-    print(f"[probe] dataset={dataset_root} cam_key={cam_key} "
-          f"kf_file={kf_file}")
-
-    X, y, g = _collect(dataset_root, cam_key, kf_file, args.num_samples)
+        cfg = VA_CONFIGS[args.config]
+        dataset_root = args.dataset or cfg.dataset_path
+        cam_key = args.cam_key or cfg.obs_cam_keys[0]
+        kf_file = getattr(cfg, "kf_file", "keyframes.jsonl")
+        print(f"[probe] dataset={dataset_root} cam_key={cam_key} "
+              f"kf_file={kf_file}")
+        X, y, g = _collect(dataset_root, cam_key, kf_file, args.num_samples)
     S = int(y.max()) + 1
     chance = 1.0 / S
     tr, va = _traj_split(g, args.seed)

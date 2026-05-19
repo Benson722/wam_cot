@@ -494,6 +494,61 @@ class Trainer:
         if dist.is_initialized():
             dist.barrier()
 
+    @torch.no_grad()
+    def collect_hidden(self, out_path, num_batches):
+        """Latent-CoT #4: dump per-latent-frame BACKBONE hidden h_t (=kf_feat,
+        the pre-head pooled hidden that forward_train returns as pred[3])
+        plus the stage label, for the stock-vs-#1 linear probe. Reuses the
+        EXACT training forward (model + _prepare_input_dict + _add_noise) so
+        the probed features are precisely what the model computes — no
+        re-implementation risk. kf_feat is pre-`kf_aux_head`, so it is the
+        backbone representation whether or not #1 was trained (stock ckpt =>
+        stock backbone hidden; #1 ckpt => #1-shaped hidden)."""
+        self.transformer.eval()
+        feats, stages, eps = [], [], []
+        n = 0
+        for bi in range(int(num_batches)):
+            batch = self.convert_input_format(self._get_next_batch())
+            if 'kf_stage' not in batch:
+                raise RuntimeError(
+                    "batch has no 'kf_stage' -> set cfg.kf_aux=True and run "
+                    "keyframe_annotate.py so the loader emits it.")
+            input_dict = self._prepare_input_dict(batch)
+            out = self.transformer(input_dict, train_mode=True)
+            if not (isinstance(out, (tuple, list)) and len(out) > 3):
+                raise RuntimeError(
+                    "forward_train didn't return kf_feat (pred[3]); re-sync "
+                    "wan_va/modules/model.py.")
+            kf_feat = out[3].float().cpu()          # [B, F_lat, d]
+            st = batch['kf_stage'].cpu()            # [B, F_lat]
+            ep = batch['kf_episode'].cpu()          # [B]
+            B, F = kf_feat.shape[0], kf_feat.shape[1]
+            m = min(F, st.shape[1])
+            for b in range(B):
+                feats.append(kf_feat[b, :m])
+                stages.append(st[b, :m])
+                eps.append(st[b, :m].clone().fill_(int(ep[b])))
+            n += B
+            if self.config.rank == 0 and (bi + 1) % 10 == 0:
+                logger.info(f"[probe-collect] {bi+1}/{num_batches} batches "
+                            f"({n} samples)")
+        import torch as _t
+        X = _t.cat(feats, 0)                        # [N, d]
+        y = _t.cat(stages, 0).long()                # [N]
+        g = _t.cat(eps, 0).long()                   # [N]
+        if self.config.rank == 0:
+            os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".",
+                        exist_ok=True)
+            _t.save({"feat": X, "stage": y, "episode": g,
+                     "ckpt": getattr(self.config,
+                                     "wan22_pretrained_model_name_or_path",
+                                     "?")}, out_path)
+            logger.info(f"[probe-collect] wrote {out_path} "
+                        f"feat={tuple(X.shape)} N={X.shape[0]} "
+                        f"stages={int(y.max())+1}")
+        if dist.is_initialized():
+            dist.barrier()
+
     def train(self):
         """Main training loop - train by steps instead of epochs."""
         logger.info(f"Starting training for {self.config.num_steps} steps...")
@@ -636,11 +691,25 @@ def run(args):
     if args.save_root is not None:
         config.save_root = args.save_root
 
+    # Latent-CoT #4: override the ckpt to probe (stock vs #1) without
+    # editing the config file each time.
+    if getattr(args, "probe_ckpt", None):
+        config.wan22_pretrained_model_name_or_path = args.probe_ckpt
+
     if rank == 0:
         logger.info(f"Using config: {args.config_name}")
         logger.info(f"World size: {world_size}, Local rank: {local_rank}")
 
     trainer = Trainer(config)
+    if getattr(args, "probe_collect", None):
+        if rank == 0:
+            logger.info(
+                f"[probe-collect] ckpt="
+                f"{config.wan22_pretrained_model_name_or_path} -> "
+                f"{args.probe_collect} ({args.probe_collect_batches} batches)")
+        trainer.collect_hidden(args.probe_collect,
+                               args.probe_collect_batches)
+        return
     trainer.train()
 
 
@@ -658,6 +727,21 @@ def main():
         type=str,
         default=None,
         help="Root directory for saving checkpoints",
+    )
+    # Latent-CoT #4: collect backbone hidden h_t instead of training.
+    parser.add_argument(
+        "--probe-collect", type=str, default=None,
+        help="Path to write the h_t feature dump (.pt). When set, runs "
+             "feature collection instead of training.",
+    )
+    parser.add_argument(
+        "--probe-collect-batches", type=int, default=64,
+        help="#batches to collect for the probe (default 64).",
+    )
+    parser.add_argument(
+        "--probe-ckpt", type=str, default=None,
+        help="Override transformer ckpt dir to probe (stock vs #1), e.g. "
+             "train_out/checkpoints/checkpoint_step_1000",
     )
 
     args = parser.parse_args()
