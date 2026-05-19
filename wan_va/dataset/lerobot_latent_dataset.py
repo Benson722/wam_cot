@@ -58,7 +58,30 @@ def construct_lerobot_multi_processor(config,
     # (multi-task training) Pool(N) would re-introduce the same hang. Each
     # repo's dataset is just metadata/latent-index construction (one-time,
     # tens of seconds even for ~12 tasks), so serial is the robust choice.
-    datasets_out_lst = [construct_func(r) for r in repo_list]
+    # Skip any task dir that fails to construct (e.g. a curated *_stable
+    # symlink set where some task wasn't fully downloaded: stock
+    # LatentLeRobotDataset asserts ALL episode files incl. videos exist,
+    # and its fallback calls an unimported get_safe_version -> NameError
+    # that would otherwise kill the whole multi-task run). Warn loudly and
+    # train on the complete tasks.
+    datasets_out_lst, skipped = [], []
+    for r in repo_list:
+        try:
+            datasets_out_lst.append(construct_func(r))
+        except Exception as e:  # noqa: BLE001
+            skipped.append((r, f"{type(e).__name__}: {e}"))
+            print(f"[dataset] SKIP incomplete/broken repo {r} -> {type(e).__name__}: {e}")
+    if skipped:
+        print(f"[dataset] skipped {len(skipped)}/{len(repo_list)} task dirs "
+              f"(incomplete download?). Kept {len(datasets_out_lst)}. "
+              f"Fix/remove these symlinks for full coverage:")
+        for r, why in skipped:
+            print(f"[dataset]   - {r}  ({why})")
+    if not datasets_out_lst:
+        raise RuntimeError(
+            f"All {len(repo_list)} task dirs under {config.dataset_path} "
+            f"failed to load (incomplete data?). First error: "
+            f"{skipped[0][1] if skipped else 'no repos found'}")
     return datasets_out_lst
 
 def get_relative_pose(pose):
