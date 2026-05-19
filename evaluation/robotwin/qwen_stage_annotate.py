@@ -44,13 +44,20 @@ from evaluation.robocasa.cot_planner import (  # noqa: E402
     _img_to_data_url,
 )
 
-_SYS = """You segment a single-arm/dual-arm robot manipulation episode into \
-ORDERED semantic STAGES from sampled video frames. A stage is a coherent \
-sub-phase of the task (e.g. "approach object", "grasp", "lift / move", \
-"place", "retract"). Use the visible motion + the task instruction. The 1st \
-stage starts at frame 0. Give 2-6 stages, strictly increasing start_frame in
-[0, length). Respond with STRICT JSON only, no markdown:
-{"stages":[{"name":"<short>","start_frame":<int>}, ...]}"""
+_SYS = """You are a JSON API. You segment a single-arm/dual-arm robot \
+manipulation episode into ORDERED semantic STAGES from sampled video \
+frames. A stage is a coherent sub-phase (e.g. "approach object", "grasp", \
+"lift / move", "place", "retract").
+
+ABSOLUTE OUTPUT RULES (a parser reads your reply with json.loads):
+- Output ONE JSON object and NOTHING else. No analysis, no explanation, \
+no markdown fences, no per-frame description, no prose before or after.
+- Your VERY FIRST output character MUST be '{' and the VERY LAST MUST \
+be '}'.
+- Schema EXACTLY: {"stages":[{"name":"<<=4 words>","start_frame":<int>}]}
+- 2-6 stages. start_frame strictly increasing, in [0, length). The \
+first stage MUST have start_frame 0.
+Think silently; reveal only the JSON."""
 
 
 def _episodes(meta_dir: Path, episodes_file: str):
@@ -122,39 +129,126 @@ def _extract_text(resp):
     return txt.strip(), fr
 
 
+def _balanced(s, st):
+    """Return the JSON object starting at s[st]=='{', closing the brackets
+    if the reply was truncated mid-object (string/array unfinished)."""
+    stack, instr, esc, out = [], False, False, []
+    for ch in s[st:]:
+        out.append(ch)
+        if instr:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                instr = False
+            continue
+        if ch == '"':
+            instr = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack:
+                stack.pop()
+            if not stack:
+                return "".join(out)
+    frag = "".join(out)
+    if instr:
+        frag += '"'
+    while stack:
+        frag += "}" if stack.pop() == "{" else "]"
+    return frag
+
+
+def _extract_json(txt):
+    """Recover the stage object from a reply that may contain prose, ```json
+    fences, or be TRUNCATED. Tries, in order: strict parse, last balanced
+    {...} containing "stages" (brace/bracket aware, truncation-repaired),
+    then a regex scrape of name/start_frame pairs. Raises only if even one
+    start_frame can't be found."""
+    s = (txt or "").strip()
+    fence = _re.search(r"```(?:json)?\s*(.*?)```", s, _re.DOTALL)
+    if fence:
+        s = fence.group(1).strip()
+    try:
+        o = CoTPlanner._parse_json(s)
+        if isinstance(o, dict) and "stages" in o:
+            return o
+    except Exception:  # noqa: BLE001
+        pass
+    starts = [m.start() for m in _re.finditer(r"\{", s)]
+    sp = s.rfind('"stages"')
+    order = []
+    if sp != -1:
+        pre = [i for i in starts if i <= sp]
+        if pre:
+            order.append(pre[-1])
+    order += list(reversed(starts))
+    seen = set()
+    for st in order:
+        if st in seen:
+            continue
+        seen.add(st)
+        frag = _balanced(s, st)
+        for cand in (frag, _re.sub(r",\s*([}\]])", r"\1", frag)):
+            try:
+                o = json.loads(cand)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(o, dict) and "stages" in o:
+                return o
+    pairs = _re.findall(
+        r'"name"\s*:\s*"([^"]*)"\s*,\s*"start_frame"\s*:\s*(\d+)', s)
+    if pairs:
+        return {"stages": [{"name": n, "start_frame": int(f)}
+                           for n, f in pairs]}
+    nums = _re.findall(r'"start_frame"\s*:\s*(\d+)', s)
+    if nums:
+        return {"stages": [{"name": "stage", "start_frame": int(n)}
+                           for n in nums]}
+    raise ValueError("no JSON stages object found in reply")
+
+
 def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
-                    timeout=180, retries=4, max_tokens=2048, no_think=True,
+                    timeout=180, retries=4, max_tokens=4096, no_think=True,
                     return_raw=False):
-    # Qwen3.5 is a reasoning model: with a small max_tokens it burns the
-    # whole budget inside <think> and emits an EMPTY content (-> the
-    # "Expecting value: line 1 column 1" you saw). Give it room AND ask it
-    # to skip thinking. We don't know serve_qwen's exact API surface, so
-    # we disable thinking three redundant ways (harmless if unsupported):
-    #   * chat_template_kwargs.enable_thinking=False (Qwen chat template)
-    #   * top-level enable_thinking=False
-    #   * a `/no_think` soft-switch token in the user text
+    # serve_qwen is a custom server that (probe-confirmed) IGNORES
+    # enable_thinking/chat_template_kwargs/`/no_think` and writes a long
+    # per-frame essay, getting cut off before any JSON. So we don't rely
+    # on the server: (1) a hard JSON-only system+user prompt, (2) OpenAI
+    # response_format=json_object (enforced if it's a vLLM backend; if the
+    # server 400s on it we retry without), (3) a big budget, (4) a
+    # truncation-tolerant extractor downstream. enable_thinking flags are
+    # still sent (harmless) for servers that DO honor them.
     hint = " /no_think" if no_think else ""
     content = [{"type": "text", "text":
                 f"TASK: {task}\nEPISODE LENGTH (frames): {length}\n"
                 f"The {len(frames)} images are frames at indices "
-                f"{list(idxs)} (chronological). Output the ordered stages "
-                f"with integer start_frame.{hint}"}]
+                f"{list(idxs)} (chronological).\n"
+                "Return ONLY the JSON object now. Do NOT describe the "
+                "frames. Do NOT explain. First character must be '{'."
+                f"{hint}"}]
     for fr_img in frames:
         content.append({"type": "image_url",
                         "image_url": {"url": _img_to_data_url(fr_img)}})
-    payload = {"model": model, "temperature": 0.1,
-               "max_tokens": int(max_tokens), "stream": False,
-               "messages": [{"role": "system", "content": _SYS},
-                            {"role": "user", "content": content}]}
+    base_payload = {"model": model, "temperature": 0.1,
+                    "max_tokens": int(max_tokens), "stream": False,
+                    "messages": [{"role": "system", "content": _SYS},
+                                 {"role": "user", "content": content}]}
+    extras = {"response_format": {"type": "json_object"}}
     if no_think:
-        payload["enable_thinking"] = False
-        payload["chat_template_kwargs"] = {"enable_thinking": False}
+        extras["enable_thinking"] = False
+        extras["chat_template_kwargs"] = {"enable_thinking": False}
     base = base_url.rstrip("/")
     url = base + ("/chat/completions" if base.endswith("/v1")
                   else "/v1/chat/completions")
-    data = json.dumps(payload).encode()
+    use_extras = True
     last = None
     for a in range(retries):
+        payload = dict(base_payload)
+        if use_extras:
+            payload.update(extras)
+        data = json.dumps(payload).encode()
         try:
             req = urllib.request.Request(
                 url, data=data, method="POST",
@@ -164,22 +258,28 @@ def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
                 resp = json.loads(r.read().decode())
             txt, fin = _extract_text(resp)
             if not txt:
-                # 200 but empty -> almost always truncated thinking;
-                # surface it so the caller can log the raw reply.
                 raise ValueError(
-                    f"empty content (finish_reason={fin}); likely "
-                    f"max_tokens={max_tokens} too small or thinking not "
-                    f"disabled")
+                    f"empty content (finish_reason={fin}); raise "
+                    f"--max-tokens (now {max_tokens})")
             return (txt, resp) if return_raw else txt
+        except urllib.error.HTTPError as e:  # noqa: PERF203
+            # server rejected an unknown field (response_format / thinking)
+            # -> drop the extras and retry plainly.
+            if use_extras and e.code in (400, 404, 422, 500):
+                use_extras = False
+                last = e
+                continue
+            last = e
+            time.sleep(min(2 ** a, 8))
         except (urllib.error.URLError, KeyError, TimeoutError, ValueError,
-                json.JSONDecodeError) as e:  # noqa: PERF203
+                json.JSONDecodeError) as e:
             last = e
             time.sleep(min(2 ** a, 8))
     raise RuntimeError(f"VLM call failed after {retries}: {last}")
 
 
 def _norm_stages(raw, length):
-    obj = CoTPlanner._parse_json(raw)
+    obj = _extract_json(raw)
     st = obj.get("stages") or []
     out = []
     for s in st:
@@ -316,9 +416,9 @@ def main():
     ap.add_argument("--model",
                     default=_cred("VLLM_MODEL", HARDCODED_VLLM_MODEL))
     ap.add_argument("--api-key", default=_cred("VLLM_API_KEY", "EMPTY"))
-    ap.add_argument("--max-tokens", type=int, default=2048,
-                    help="generation budget; reasoning models need room "
-                         "or `content` comes back empty (default 2048)")
+    ap.add_argument("--max-tokens", type=int, default=4096,
+                    help="generation budget; this server essays before the "
+                         "JSON so it needs room (default 4096)")
     ap.add_argument("--think", action="store_true",
                     help="allow Qwen <think> reasoning (default: disabled "
                          "via /no_think + enable_thinking=False)")
