@@ -209,32 +209,43 @@ def _extract_json(txt):
     raise ValueError("no JSON stages object found in reply")
 
 
+_PREFIX = '{"stages": ['  # assistant-prefill seed (--prefill)
+
+
 def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
                     timeout=600, retries=4, max_tokens=4096, no_think=True,
-                    return_raw=False):
+                    return_raw=False, prefill=False):
     # serve_qwen is a custom server that (probe-confirmed) IGNORES
-    # enable_thinking/chat_template_kwargs/`/no_think` and writes a long
-    # per-frame essay, getting cut off before any JSON. So we don't rely
-    # on the server: (1) a hard JSON-only system+user prompt, (2) OpenAI
-    # response_format=json_object (enforced if it's a vLLM backend; if the
-    # server 400s on it we retry without), (3) a big budget, (4) a
-    # truncation-tolerant extractor downstream. enable_thinking flags are
-    # still sent (harmless) for servers that DO honor them.
+    # enable_thinking/chat_template_kwargs/`/no_think`/response_format and
+    # writes a long per-frame essay, never reaching JSON. We don't rely on
+    # the server: (1) a hard prompt that forces the JSON to be the LAST
+    # thing in the reply, (2) optional assistant-prefill that literally
+    # starts the model's turn with `{"stages": [`, (3) a big budget, (4) a
+    # truncation-tolerant extractor that grabs the trailing {...}. The
+    # extras are still sent (harmless) for servers that DO honor them.
     hint = " /no_think" if no_think else ""
     content = [{"type": "text", "text":
                 f"TASK: {task}\nEPISODE LENGTH (frames): {length}\n"
                 f"The {len(frames)} images are frames at indices "
                 f"{list(idxs)} (chronological).\n"
-                "Return ONLY the JSON object now. Do NOT describe the "
-                "frames. Do NOT explain. First character must be '{'."
-                f"{hint}"}]
+                "You may reason briefly, but your reply MUST END WITH the "
+                "JSON object and the LAST character MUST be '}'. Put "
+                "nothing after the closing brace. Schema: "
+                '{"stages":[{"name":"<<=4 words>","start_frame":<int>}]} '
+                f"(2-6 stages, start_frame increasing, first=0).{hint}"}]
     for fr_img in frames:
         content.append({"type": "image_url",
                         "image_url": {"url": _img_to_data_url(fr_img)}})
+    messages = [{"role": "system", "content": _SYS},
+                {"role": "user", "content": content}]
+    if prefill:
+        # put words in the model's mouth so it continues a JSON array
+        # instead of narrating (works iff the server doesn't re-open a
+        # fresh assistant turn; harmless otherwise — extractor still runs).
+        messages.append({"role": "assistant", "content": _PREFIX})
     base_payload = {"model": model, "temperature": 0.1,
                     "max_tokens": int(max_tokens), "stream": False,
-                    "messages": [{"role": "system", "content": _SYS},
-                                 {"role": "user", "content": content}]}
+                    "messages": messages}
     extras = {"response_format": {"type": "json_object"}}
     if no_think:
         extras["enable_thinking"] = False
@@ -261,6 +272,10 @@ def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
                 raise ValueError(
                     f"empty content (finish_reason={fin}); raise "
                     f"--max-tokens (now {max_tokens})")
+            # if prefill and the server returned only the continuation
+            # (no leading brace / 'stages'), glue the seed back on.
+            if prefill and '"stages"' not in txt[:40]:
+                txt = _PREFIX + txt
             return (txt, resp) if return_raw else txt
         except urllib.error.HTTPError as e:  # noqa: PERF203
             # server rejected an unknown field (response_format / thinking)
@@ -304,7 +319,8 @@ def _norm_stages(raw, length):
 
 
 def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
-          base_url, model, api_key, max_tokens, no_think, timeout=600):
+          base_url, model, api_key, max_tokens, no_think, timeout=600,
+          prefill=False):
     """One-shot diagnostic: annotate ONLY episode 0 and DUMP the raw server
     reply + the parsed stages. Use this FIRST to confirm serve_qwen is
     answering in the expected JSON before running the full (recursive)
@@ -328,15 +344,18 @@ def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
     txt, resp = _vlm_stage_call(base_url, model, api_key, task, L, idxs,
                                 frs, max_tokens=max_tokens,
                                 no_think=no_think, timeout=timeout,
-                                return_raw=True)
+                                return_raw=True, prefill=prefill)
     print(f"[probe] VLM replied in {time.time()-tc:.1f}s", flush=True)
     msg = (resp.get("choices") or [{}])[0].get("message", {})
+    fin = (resp.get("choices") or [{}])[0].get("finish_reason")
     print("[probe] --- raw server message keys:", list(msg.keys()))
-    print("[probe] --- finish_reason:",
-          (resp.get("choices") or [{}])[0].get("finish_reason"))
+    print(f"[probe] --- finish_reason: {fin}  (length => still essaying / "
+          "raise --max-tokens or use --prefill)")
     print("[probe] --- usage:", resp.get("usage"))
-    print("[probe] --- extracted text (first 800 chars):\n"
-          + txt[:800])
+    print(f"[probe] --- extracted text: {len(txt)} chars")
+    print("[probe] --- HEAD (first 500):\n" + txt[:500])
+    print("[probe] --- TAIL (last 500) -- the JSON should be HERE:\n"
+          + txt[-500:])
     stages = _norm_stages(txt, L)
     print(f"[probe] --- PARSED {len(stages)} stages:")
     for s in stages:
@@ -347,7 +366,8 @@ def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
 
 def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
              out_name: str, base_url, model, api_key, max_tokens=4096,
-             no_think=True, limit=0, debug=False, timeout=600):
+             no_think=True, limit=0, debug=False, timeout=600,
+             prefill=False):
     meta = dataset / "meta"
     eps = _episodes(meta, episodes_file)
     if limit > 0:
@@ -373,7 +393,8 @@ def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
                       f"(mt={max_tokens})...", end="", flush=True)
                 raw = _vlm_stage_call(base_url, model, api_key, task, L,
                                       idxs, frs, max_tokens=max_tokens,
-                                      no_think=no_think, timeout=timeout)
+                                      no_think=no_think, timeout=timeout,
+                                      prefill=prefill)
                 stages = _norm_stages(raw, L)
                 print(f" {len(stages)} stages in {time.time()-t0:.1f}s",
                       flush=True)
@@ -390,7 +411,8 @@ def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
                         _t, _r = _vlm_stage_call(
                             base_url, model, api_key, task, L, idxs,
                             _read_frames(mp4, idxs), max_tokens=max_tokens,
-                            no_think=no_think, return_raw=True)
+                            no_think=no_think, timeout=timeout,
+                            return_raw=True, prefill=prefill)
                     except Exception as e2:  # noqa: BLE001
                         print(f"[stage][debug] ep{ei} raw call still "
                               f"failing: {e2}")
@@ -446,6 +468,10 @@ def main():
                          "(0=all; use a small N for a quick smoke test)")
     ap.add_argument("--debug", action="store_true",
                     help="print the first raw VLM reply per task dir")
+    ap.add_argument("--prefill", action="store_true",
+                    help="seed the assistant turn with '{\"stages\": [' so "
+                         "the model continues JSON instead of narrating "
+                         "(strongest anti-essay lever for this server)")
     ap.add_argument("--probe", action="store_true",
                     help="diagnostic: dump the raw server reply for ep0 of "
                          "the (first) task and exit; writes nothing")
@@ -463,7 +489,7 @@ def main():
             root = t[0]
         probe(root, args.cam_key, args.frames, args.episodes_file,
               args.base_url, args.model, args.api_key, args.max_tokens,
-              no_think, args.timeout)
+              no_think, args.timeout, args.prefill)
         return
     if args.recursive:
         targets = sorted({
@@ -478,14 +504,15 @@ def main():
                 annotate(t, args.cam_key, args.frames, args.episodes_file,
                          args.out_name, args.base_url, args.model,
                          args.api_key, args.max_tokens, no_think,
-                         args.limit, args.debug, args.timeout)
+                         args.limit, args.debug, args.timeout,
+                         args.prefill)
             except Exception as e:  # noqa: BLE001
                 print(f"[stage] SKIP {t}: {e}")
     else:
         annotate(root, args.cam_key, args.frames, args.episodes_file,
                  args.out_name, args.base_url, args.model, args.api_key,
                  args.max_tokens, no_think, args.limit, args.debug,
-                 args.timeout)
+                 args.timeout, args.prefill)
 
 
 if __name__ == "__main__":
