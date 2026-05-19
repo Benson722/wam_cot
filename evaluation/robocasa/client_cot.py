@@ -73,13 +73,17 @@ ABLATIONS = (
 )
 
 
-def _make_plan(planner, language, first_img, ablation):
+def _make_plan(planner, language, scene_text, first_img, ablation):
     """Return (reasoning, [ {instruction,max_steps}... ], planner_failed)."""
     if ablation == "no_cot":
         return ("(no_cot ablation: single full-task prompt)",
                 [{"instruction": language, "max_steps": 100000}], False)
-    img = None if ablation == "blind_planner" else first_img
-    plan = planner.plan(language, img)
+    if ablation == "blind_planner":
+        # degrade perception: planner sees neither scene-text nor image
+        scene_text, first_img = None, None
+    # image is only consumed when the backend is multimodal (vLLM/VLM);
+    # the text-only DeepSeek backend ignores it (multimodal=False).
+    plan = planner.plan(language, scene_text=scene_text, image=first_img)
     subs = plan.get("subtasks", [])
     if ablation == "shuffle_subtasks" and len(subs) > 1:
         subs = subs[:]
@@ -113,11 +117,14 @@ def run_one(session, planner, env_name, ep, out_dir, env_overrides,
         first_img = first_obs.get("observation.images.agentview_rgb")
         print(f"[cot:{ablation}] {env_name} ep{ep} :: '{language}'")
 
+        scene0 = env.get_scene_text()
         reasoning, subtasks, planner_failed = _make_plan(
-            planner, language, first_img, ablation
+            planner, language, scene0, first_img, ablation
         )
         plan_trace = {
             "language": language, "ablation": ablation,
+            "planner_backend": planner.cfg.backend,
+            "scene_text": scene0,
             "reasoning": reasoning,
             "subtasks": [s["instruction"] for s in subtasks],
             "events": [],
@@ -149,10 +156,12 @@ def run_one(session, planner, env_name, ep, out_dir, env_overrides,
             kf_idx = len(full_obs_list)
             if kf_idx % max(monitor_every_kf, 1) != 0:
                 return None
+            blind = ablation == "blind_planner"
             m = planner.monitor(
                 language, cur["instruction"],
                 [s["instruction"] for s in subtasks[si + 1:]],
-                None if ablation == "blind_planner" else
+                scene_text=None if blind else _env.get_scene_text(),
+                image=None if blind else
                 obs.get("observation.images.agentview_rgb"),
             )
             verdict["reason"] = m.get("reason", "")
@@ -199,7 +208,7 @@ def run_one(session, planner, env_name, ep, out_dir, env_overrides,
                     ]
                 else:
                     _, subtasks, _ = _make_plan(
-                        planner, language,
+                        planner, language, env.get_scene_text(),
                         full_obs_list[-1].get(
                             "observation.images.agentview_rgb"),
                         ablation,
@@ -334,24 +343,33 @@ def main():
                     help="JSON overriding RobocasaConfig (post probe_env.py)")
     ap.add_argument("--monitor-every-keyframes", type=int, default=2,
                     help="VLM-monitor cadence in key-frames (API cost knob)")
-    # planner / DeepSeek
-    ap.add_argument("--vlm-model",
-                    default=_cred("DEEPSEEK_MODEL", HARDCODED_DEEPSEEK_MODEL))
-    ap.add_argument("--vlm-base-url",
-                    default=_cred("DEEPSEEK_BASE_URL",
-                                  HARDCODED_DEEPSEEK_BASE_URL))
+    # planner backend: "deepseek" = text-only API (default, reasons over the
+    # symbolic scene-text); "vllm" = local Qwen3.5-27B multimodal via vLLM.
+    ap.add_argument("--planner", choices=["deepseek", "vllm"],
+                    default="deepseek",
+                    help="high-level planner backend (text-only vs local VLM)")
+    ap.add_argument("--vlm-model", default=None,
+                    help="override served model id (else backend preset)")
+    ap.add_argument("--vlm-base-url", default=None,
+                    help="override OpenAI-compatible base url (else preset)")
     ap.add_argument("--vlm-text-only", action="store_true",
-                    help="force text-only planner (model not multimodal)")
+                    help="force text-only even on a multimodal backend "
+                         "(perception-modality ablation)")
     args = ap.parse_args()
 
     overrides = json.loads(args.env_overrides) if args.env_overrides else None
-    pcfg = PlannerConfig(
+    pcfg = PlannerConfig.for_backend(
+        args.planner,
         base_url=args.vlm_base_url,
         model=args.vlm_model,
-        multimodal=not args.vlm_text_only,
+        multimodal=False if args.vlm_text_only else None,
         log_path=str(Path(args.out_dir) / "vlm_calls.jsonl"),
     )
-    if (not pcfg.api_key or "REPLACE" in pcfg.api_key) and args.ablation != "no_cot":
+    print(f"[cot] planner backend={pcfg.backend} model={pcfg.model} "
+          f"base_url={pcfg.base_url} multimodal={pcfg.multimodal}")
+    if (pcfg.backend == "deepseek"
+            and (not pcfg.api_key or "REPLACE" in pcfg.api_key)
+            and args.ablation != "no_cot"):
         print("WARNING: DeepSeek API key not set. Edit "
               "HARDCODED_DEEPSEEK_API_KEY in evaluation/robocasa/cot_planner.py "
               "(or export DEEPSEEK_API_KEY). Only --ablation no_cot works "

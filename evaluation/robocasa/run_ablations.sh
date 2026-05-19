@@ -4,16 +4,19 @@
 # Run in the *robocasa* conda env on the internet-capable 4090.
 set -e
 
-# DeepSeek creds are hardcoded in evaluation/robocasa/cot_planner.py.
+# Creds/endpoints hardcoded in cot_planner.py. Planner backend is selectable:
+#   PLANNER=deepseek (default, text-only)  |  PLANNER=vllm (local Qwen VLM).
+# Re-run the whole matrix under the VLM with: PLANNER=vllm bash run_ablations.sh
 PORT=${PORT:-29056}
 TEST_NUM=${TEST_NUM:-25}
 TASKS=${TASKS:-"PickPlaceCounterToCabinet PickPlaceCounterToMicrowave OpenDrawer"}
 ROOT=${ROOT:-outputs/robocasa}
 ENV_OVERRIDES=${ENV_OVERRIDES:-}
+PLANNER=${PLANNER:-deepseek}
 
 run_cot () {  # $1=ablation $2=outdir
   OUT_DIR="$2" ABLATION="$1" PORT="$PORT" TEST_NUM="$TEST_NUM" \
-    TASKS="$TASKS" ENV_OVERRIDES="$ENV_OVERRIDES" \
+    TASKS="$TASKS" ENV_OVERRIDES="$ENV_OVERRIDES" PLANNER="$PLANNER" \
     bash evaluation/robocasa/launch_client_cot.sh
 }
 

@@ -6,7 +6,10 @@ from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 import cv2
 from pathlib import Path
 
-robowin_root = Path("/path/to/your/robowin")
+# RoboTwin install on the server (ROBOTWIN_ROOT env overrides if ever moved).
+robowin_root = Path(os.environ.get(
+    "ROBOTWIN_ROOT",
+    "/inspire/qb-ilm2/project/26summer-camp-11/public/group3/RoboTwin"))
 if str(robowin_root) not in sys.path:
     sys.path.insert(0, str(robowin_root))
 

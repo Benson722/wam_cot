@@ -6,7 +6,10 @@ from .shared_config import va_shared_cfg
 va_robotwin_cfg = EasyDict(__name__='Config: VA robotwin')
 va_robotwin_cfg.update(va_shared_cfg)
 
-va_robotwin_cfg.wan22_pretrained_model_name_or_path = "/path/to/pretrained/model"
+# RoboTwin post-trained weights on the server (sibling of the libero-long
+# ckpt used by the robocasa cfg). CONFIRM this path and set its
+# transformer/config.json -> "attn_mode": "torch" before serving.
+va_robotwin_cfg.wan22_pretrained_model_name_or_path = "/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/checkpoints/lingbot-va-posttrain-robotwin"
 
 va_robotwin_cfg.attn_window = 72
 va_robotwin_cfg.frame_chunk_size = 2

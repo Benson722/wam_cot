@@ -43,6 +43,18 @@ HARDCODED_DEEPSEEK_API_KEY = "sk-bf71c76a9b5a4baf82ea78759ba2a0fa"
 HARDCODED_DEEPSEEK_MODEL = "deepseek-v4-pro"
 HARDCODED_DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 
+# ---------------------------------------------------------------------------
+# Future local VLM via vLLM (OpenAI-compatible). The user will serve
+#   /inspire/qb-ilm2/project/26summer-camp-11/public/group3/models/Qwen3.5-27B
+# e.g.:
+#   vllm serve /inspire/.../models/Qwen3.5-27B \
+#       --served-model-name Qwen3.5-27B --port 8000 \
+#       --trust-remote-code --limit-mm-per-prompt image=1
+# vLLM ignores the API key but the OpenAI-style call needs a non-empty one.
+HARDCODED_VLLM_API_KEY = "EMPTY"
+HARDCODED_VLLM_MODEL = "Qwen3.5-27B"
+HARDCODED_VLLM_BASE_URL = "http://127.0.0.1:8000/v1"
+
 
 def _cred(env_name: str, hardcoded: str) -> str:
     """env var wins if non-empty, else the hardcoded constant above."""
@@ -50,9 +62,30 @@ def _cred(env_name: str, hardcoded: str) -> str:
     return v if v else hardcoded
 
 
+# Two presets. Switch with PlannerConfig.for_backend("deepseek"|"vllm") or the
+# client's --planner flag. "deepseek" = text-only reasoning over scene-text;
+# "vllm" = local Qwen3.5-27B multimodal (image, + scene-text as extra grounding).
+def backend_defaults(backend: str) -> Dict[str, object]:
+    b = (backend or "deepseek").lower()
+    if b == "vllm":
+        return dict(
+            base_url=_cred("VLLM_BASE_URL", HARDCODED_VLLM_BASE_URL),
+            api_key=_cred("VLLM_API_KEY", HARDCODED_VLLM_API_KEY),
+            model=_cred("VLLM_MODEL", HARDCODED_VLLM_MODEL),
+            multimodal=True,
+        )
+    return dict(
+        base_url=_cred("DEEPSEEK_BASE_URL", HARDCODED_DEEPSEEK_BASE_URL),
+        api_key=_cred("DEEPSEEK_API_KEY", HARDCODED_DEEPSEEK_API_KEY),
+        model=_cred("DEEPSEEK_MODEL", HARDCODED_DEEPSEEK_MODEL),
+        multimodal=False,
+    )
+
+
 # ---------------------------------------------------------------------------
 @dataclasses.dataclass
 class PlannerConfig:
+    backend: str = "deepseek"        # "deepseek" (text) | "vllm" (Qwen VLM)
     base_url: str = _cred("DEEPSEEK_BASE_URL", HARDCODED_DEEPSEEK_BASE_URL)
     api_key: str = _cred("DEEPSEEK_API_KEY", HARDCODED_DEEPSEEK_API_KEY)
     model: str = _cred("DEEPSEEK_MODEL", HARDCODED_DEEPSEEK_MODEL)
@@ -60,8 +93,20 @@ class PlannerConfig:
     max_tokens: int = 1024
     timeout_s: int = 90
     max_retries: int = 4
-    multimodal: bool = True          # set False / use blind mode for text-only
+    # False => never send images (text-only DeepSeek). True => send the camera
+    # frame too (local Qwen VLM). scene-text is sent in BOTH modes.
+    multimodal: bool = False
     log_path: Optional[str] = None   # JSONL call log
+
+    @classmethod
+    def for_backend(cls, backend: str, **overrides) -> "PlannerConfig":
+        """Build a config from a backend preset; non-None kwargs win."""
+        d = dict(backend=(backend or "deepseek").lower())
+        d.update(backend_defaults(backend))
+        for k, v in overrides.items():
+            if v is not None:
+                d[k] = v
+        return cls(**d)
 
 
 def _img_to_data_url(img: np.ndarray, max_side: int = 512) -> str:
@@ -80,10 +125,13 @@ def _img_to_data_url(img: np.ndarray, max_side: int = 512) -> str:
 
 _PLAN_SYS = """You are the high-level PLANNER for a single-arm robot performing \
 kitchen manipulation in the RoboCasa simulator. You receive a task instruction \
-and the current camera image. Think about PHYSICAL CONSTRAINTS before acting: \
-occlusion, containment (a container must be opened before something is placed \
-inside / removed), order (move a blocking or heavy object before grasping the \
-target), reachability, and stability.
+and a STRUCTURED SCENE STATE (simulator ground-truth: object / gripper / \
+receptacle / distractor positions, offsets-to-end-effector and distances, \
+object & fixture names, a SUCCESS_PREDICATE) and, when available, a camera \
+image. Reason ONLY from what is given. Think about PHYSICAL CONSTRAINTS before \
+acting: occlusion, containment (a container must be opened before something is \
+placed inside / removed), order (move a blocking or heavy object before \
+grasping the target), reachability, and stability.
 
 Decompose the task into an ORDERED list of ATOMIC sub-tasks. Each sub-task MUST:
  - be ONE primitive only: a single pick, place, open, close, push, turn, or press;
@@ -99,17 +147,23 @@ Keep 2-6 sub-tasks. max_steps is a generous per-sub-task safety budget \
 (e.g. 120-300)."""
 
 _MONITOR_SYS = """You are the high-level MONITOR for a single-arm RoboCasa robot. \
-Given the overall task, the sub-task currently being executed, the remaining \
-planned sub-tasks, and the current camera image, judge progress from what is \
-VISIBLE.
+You are given the overall task, the sub-task being executed now, the remaining \
+planned sub-tasks, and the current STRUCTURED SCENE STATE (simulator \
+ground-truth incl. a SUCCESS_PREDICATE and object/gripper offsets & distances) \
+and, when available, a camera image. Judge progress ONLY from what is given.
+
+Rules: if SUCCESS_PREDICATE is True, set task_success true. Treat the \
+structured state as authoritative ground truth. Use distances/offsets to \
+decide whether the current sub-task (e.g. a grasp/place/open) is achieved.
 
 Respond with STRICT JSON only, no markdown:
-{"subtask_done": <bool>,        // current sub-task visually achieved
- "task_success": <bool>,        // the whole task is visually achieved
- "need_replan": <bool>,         // scene contradicts the remaining plan
+{"subtask_done": <bool>,        // current sub-task achieved
+ "task_success": <bool>,        // whole task achieved (true if SUCCESS_PREDICATE)
+ "need_replan": <bool>,         // state contradicts the remaining plan
  "revised_plan": [{"instruction": "...", "max_steps": <int>}, ...] | null,
  "reason": "<one short sentence>"}
-Be conservative: only set subtask_done/task_success true when clearly visible."""
+Be conservative: only set subtask_done/task_success true when the state \
+clearly supports it."""
 
 
 class CoTPlanner:
@@ -212,11 +266,18 @@ class CoTPlanner:
 
     # -- high-level API ----------------------------------------------------
     def plan(self, task_instruction: str,
-             image: Optional[np.ndarray]) -> Dict:
+             scene_text: Optional[str] = None,
+             image: Optional[np.ndarray] = None) -> Dict:
         """-> {"reasoning": str, "subtasks": [{"instruction","max_steps"}...]}"""
+        has_img = image is not None and self.cfg.multimodal
+        if scene_text:
+            state = f"STRUCTURED SCENE STATE:\n{scene_text}\n"
+        else:
+            state = "(no structured scene state; reason from the task text only)\n"
         user = (
             f"TASK: {task_instruction}\n"
-            f"{'(no image provided; reason from the task text only)' if image is None or not self.cfg.multimodal else 'The image shows the current scene.'}\n"
+            f"{state}"
+            f"{'A camera image of the current scene is also attached.' if has_img else ''}\n"
             "Produce the physical-constraint reasoning and the ordered atomic "
             "sub-task plan as STRICT JSON."
         )
@@ -249,13 +310,19 @@ class CoTPlanner:
             }
 
     def monitor(self, task_instruction: str, current_subtask: str,
-                remaining: List[str], image: Optional[np.ndarray]) -> Dict:
+                remaining: List[str], scene_text: Optional[str] = None,
+                image: Optional[np.ndarray] = None) -> Dict:
         """-> {subtask_done, task_success, need_replan, revised_plan, reason}"""
+        has_img = image is not None and self.cfg.multimodal
+        state = (f"CURRENT STRUCTURED SCENE STATE:\n{scene_text}\n"
+                 if scene_text else "")
         user = (
             f"TASK: {task_instruction}\n"
             f"CURRENT SUB-TASK (being executed now): {current_subtask}\n"
             f"REMAINING PLAN: {json.dumps(remaining)}\n"
-            "Judge progress from the image. STRICT JSON only."
+            f"{state}"
+            f"{'A camera image is also attached.' if has_img else ''}\n"
+            "Judge progress from the given state. STRICT JSON only."
         )
         raw = self._chat(_MONITOR_SYS, user, image)
         try:

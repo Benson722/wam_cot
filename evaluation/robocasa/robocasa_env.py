@@ -408,6 +408,97 @@ class RobocasaEnv:
             for lkey, src in self._resolved_cam.items()
         }
 
+    # -- symbolic scene text (for the TEXT-ONLY DeepSeek planner) ----------
+    def get_scene_text(self) -> str:
+        """Serialize the robosuite ground-truth low-dim state into a compact
+        text block the text-only planner/monitor reasons over (no pixels).
+
+        Defensive: any absent key is skipped (obs keys are task-dependent).
+        Kept short to bound LLM token cost. The VLM path does not need this
+        (it sees the image) but may also receive it as extra grounding."""
+        raw = self._last_obs or {}
+        lines: list[str] = []
+
+        def vec(key, nd=3):
+            v = raw.get(key)
+            if v is None:
+                return None
+            a = np.asarray(v).reshape(-1)
+            return [round(float(x), nd) for x in a.tolist()]
+
+        # task language
+        if self._task_language:
+            lines.append(f"TASK: {self._task_language}")
+
+        # gripper state (Panda 2-finger qpos; sum is a coarse open/closed cue)
+        gq = vec("robot0_gripper_qpos")
+        if gq is not None:
+            g = float(np.sum(gq))
+            lines.append(
+                f"GRIPPER: qpos_sum={round(g,3)} "
+                f"(~{'OPEN' if g > 0.04 else 'CLOSED'}; heuristic)")
+        eef = vec("robot0_eef_pos")
+        if eef is not None:
+            lines.append(f"EEF_POS: {eef}")
+
+        # target object: absolute pos + offset/distance to the end-effector
+        op = vec("obj_pos")
+        oe = vec("obj_to_robot0_eef_pos")
+        if op is not None or oe is not None:
+            seg = "TARGET_OBJECT:"
+            if op is not None:
+                seg += f" pos={op}"
+            if oe is not None:
+                d = round(float(np.linalg.norm(oe)), 3)
+                seg += f" offset_to_eef={oe} dist={d}m"
+            lines.append(seg)
+
+        # distractors / receptacle relative positions (occlusion cues)
+        for k in sorted(raw.keys()):
+            if k.startswith("distr_") and k.endswith("_to_robot0_eef_pos"):
+                ov = vec(k)
+                if ov is not None:
+                    nm = k[len("distr_"):-len("_to_robot0_eef_pos")]
+                    d = round(float(np.linalg.norm(ov)), 3)
+                    lines.append(
+                        f"DISTRACTOR[{nm}]: offset_to_eef={ov} dist={d}m")
+
+        # episode metadata: object / fixture names, layout
+        try:
+            fn = getattr(self.env, "get_ep_meta", None)
+            meta = fn() if callable(fn) else {}
+        except Exception:
+            meta = {}
+        if isinstance(meta, dict):
+            names = []
+            for c in (meta.get("object_cfgs") or []):
+                if isinstance(c, dict):
+                    nm = c.get("name") or c.get("type")
+                    grp = c.get("obj_groups") or c.get("category")
+                    names.append(
+                        f"{nm}({grp})" if grp and nm else str(nm or grp))
+            if names:
+                lines.append("OBJECTS: " + ", ".join(str(n) for n in names))
+            fx = meta.get("fixtures")
+            if isinstance(fx, dict) and fx:
+                lines.append(
+                    "FIXTURES: " + ", ".join(sorted(map(str, fx.keys()))[:12]))
+            elif isinstance(fx, (list, tuple)) and fx:
+                lines.append(
+                    "FIXTURES: " + ", ".join(map(str, list(fx)[:12])))
+            if meta.get("layout_id") is not None:
+                lines.append(
+                    f"LAYOUT: layout_id={meta.get('layout_id')} "
+                    f"style_id={meta.get('style_id')}")
+
+        # sim ground-truth success predicate (key monitor signal)
+        try:
+            lines.append(f"SUCCESS_PREDICATE: {bool(self.check_success())}")
+        except Exception:
+            pass
+        lines.append(f"STEP: {self._ep_steps}")
+        return "\n".join(lines)
+
     # -- action conversion -------------------------------------------------
     def expand_action(self, model_action_7d: np.ndarray) -> np.ndarray:
         """``[dx,dy,dz,drx,dry,drz,grip]`` (7,) -> full env action vector.
