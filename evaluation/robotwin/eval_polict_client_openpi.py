@@ -402,6 +402,36 @@ def main(usr_args):
     
     model = WebsocketClientPolicy(port=usr_args['port'])
 
+    # ---- WAM-CoT (Route-1, External Semantic CoT) optional planner ------
+    # Enabled with override `--cot True`. Defaults to the local Qwen VLM
+    # (vllm backend, OpenAI-compatible :8000/v1). Passed as explicit
+    # eval_policy kwargs (NOT into `args`, which is **-splatted into
+    # TASK_ENV.setup_demo and must stay scalar/JSON-safe).
+    cot_enabled = bool(usr_args.get("cot", False))
+    cot_ablation = str(usr_args.get("cot_ablation", "none"))
+    monitor_every = int(usr_args.get("monitor_every", 2))
+    cot_planner = None
+    if cot_enabled:
+        try:
+            # cot_planner is a generic, sim-agnostic module (lives under
+            # evaluation/robocasa/ but has no Robocasa deps).
+            from evaluation.robocasa.cot_planner import CoTPlanner, PlannerConfig
+        except Exception as e:  # noqa: BLE001
+            raise RuntimeError(
+                "--cot needs evaluation/robocasa/cot_planner.py importable "
+                f"from the LingBot repo: {e}")
+        pcfg = PlannerConfig.for_backend(
+            str(usr_args.get("planner", "vllm")),
+            base_url=usr_args.get("vlm_base_url"),
+            model=usr_args.get("vlm_model"),
+            multimodal=(False if usr_args.get("vlm_text_only") else None),
+            log_path=str(Path(usr_args["save_root"]) / "vlm_calls.jsonl"),
+        )
+        cot_planner = CoTPlanner(pcfg)
+        print(f"[cot] backend={pcfg.backend} model={pcfg.model} "
+              f"base_url={pcfg.base_url} multimodal={pcfg.multimodal} "
+              f"ablation={cot_ablation} monitor_every={monitor_every}")
+
     st_seed, suc_num = eval_policy(task_name,
                                    TASK_ENV,
                                    args,
@@ -412,7 +442,11 @@ def main(usr_args):
                                    instruction_type=instruction_type,
                                    save_visualization=True,
                                    video_guidance_scale=video_guidance_scale,
-                                   action_guidance_scale=action_guidance_scale)
+                                   action_guidance_scale=action_guidance_scale,
+                                   cot=cot_enabled,
+                                   cot_ablation=cot_ablation,
+                                   monitor_every=monitor_every,
+                                   cot_planner=cot_planner)
     suc_nums.append(suc_num)
 
     file_path = os.path.join(save_dir, f"_result.txt")
@@ -454,7 +488,11 @@ def eval_policy(task_name,
                 instruction_type=None,
                 save_visualization=False,
                 video_guidance_scale=5.0,
-                action_guidance_scale=5.0):
+                action_guidance_scale=5.0,
+                cot=False,
+                cot_ablation="none",
+                monitor_every=2,
+                cot_planner=None):
     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
 
@@ -542,8 +580,36 @@ def eval_policy(task_name,
         succ = False
 
         prompt = TASK_ENV.get_instruction()
-        ret = model.infer(dict(reset = True, prompt=prompt, save_visualization=save_visualization))
-        
+
+        # ---- WAM-CoT (Route-1) high-level plan via the VLM -------------
+        cot_on = bool(cot) and (cot_planner is not None) and (cot_ablation != "no_cot")
+        cot_trace = {"task": prompt, "ablation": cot_ablation,
+                     "backend": (cot_planner.cfg.backend if cot_planner else None),
+                     "reasoning": "", "subtasks": [], "events": []}
+        subtasks = None
+        si = 0
+        chunk_idx = 0
+        if cot_on:
+            head0 = format_obs(TASK_ENV.get_obs(), prompt)["observation.images.cam_high"]
+            _plan = cot_planner.plan(prompt, image=np.asarray(head0))
+            subtasks = _plan.get("subtasks") or [{"instruction": prompt,
+                                                  "max_steps": 100000}]
+            if cot_ablation == "shuffle_subtasks" and len(subtasks) > 1:
+                import random as _rnd
+                subtasks = subtasks[:]
+                _rnd.shuffle(subtasks)
+            cot_trace["reasoning"] = _plan.get("reasoning", "")
+            cot_trace["subtasks"] = [s["instruction"] for s in subtasks]
+            active_prompt = subtasks[0]["instruction"]
+            sub_start_cnt = TASK_ENV.take_action_cnt
+            replans = 0
+            print(f"[cot] plan ({len(subtasks)} subtasks): "
+                  + " | ".join(cot_trace["subtasks"]))
+        else:
+            active_prompt = prompt
+
+        ret = model.infer(dict(reset = True, prompt=active_prompt, save_visualization=save_visualization))
+
         first = True
         full_obs_list = []
         gen_video_list = []
@@ -561,9 +627,9 @@ def eval_policy(task_name,
         while TASK_ENV.take_action_cnt<TASK_ENV.step_lim:
             if first:
                 observation = TASK_ENV.get_obs()
-                first_obs = format_obs(observation, prompt)
+                first_obs = format_obs(observation, active_prompt)
 
-            ret = model.infer(dict(obs=first_obs, prompt=prompt, save_visualization=save_visualization, video_guidance_scale=video_guidance_scale, action_guidance_scale=action_guidance_scale)) #(TASK_ENV, model, observation)
+            ret = model.infer(dict(obs=first_obs, prompt=active_prompt, save_visualization=save_visualization, video_guidance_scale=video_guidance_scale, action_guidance_scale=action_guidance_scale)) #(TASK_ENV, model, observation)
             action = ret['action']
             if 'video' in ret:
                 imagined_video = ret['video']
@@ -602,17 +668,87 @@ def eval_policy(task_name,
                     TASK_ENV.take_action(ee_action, action_type='ee')
                    
                     if (j+1) % action_per_frame == 0:
-                        obs = format_obs(TASK_ENV.get_obs(), prompt)
+                        obs = format_obs(TASK_ENV.get_obs(), active_prompt)
                         full_obs_list.append(obs)
                         key_frame_list.append(obs)
                     
             first = False
 
             model.infer(dict(obs = key_frame_list, compute_kv_cache=True, imagine=False, save_visualization=save_visualization, state=action))
-  
+
             if TASK_ENV.eval_success:
                 succ = True
                 break
+
+            # ---- WAM-CoT monitor: advance / replan via the VLM --------
+            if cot_on:
+                chunk_idx += 1
+                latest = key_frame_list[-1] if key_frame_list else first_obs
+                head = np.asarray(latest["observation.images.cam_high"])
+                budget = int(subtasks[si].get("max_steps", 100000))
+                over_budget = (TASK_ENV.take_action_cnt - sub_start_cnt) >= budget
+                advance = False
+                use_mon = (cot_ablation != "no_monitor") and \
+                    (chunk_idx % max(1, monitor_every) == 0)
+                if use_mon:
+                    v = cot_planner.monitor(
+                        prompt, subtasks[si]["instruction"],
+                        [s["instruction"] for s in subtasks[si + 1:]],
+                        image=head)
+                    cot_trace["events"].append(
+                        {"chunk": chunk_idx, "subtask": si,
+                         "reason": v.get("reason", ""),
+                         "done": bool(v.get("subtask_done")),
+                         "replan": bool(v.get("need_replan"))})
+                    if v.get("task_success"):
+                        succ = True
+                        break
+                    if v.get("need_replan") and replans < 4:
+                        replans += 1
+                        rp = v.get("revised_plan")
+                        if rp:
+                            subtasks = [
+                                {"instruction": (str(s.get("instruction", s))
+                                                 if isinstance(s, dict)
+                                                 else str(s)),
+                                 "max_steps": (int(s.get("max_steps", 100000))
+                                               if isinstance(s, dict)
+                                               else 100000)}
+                                for s in rp]
+                        else:
+                            _p = cot_planner.plan(prompt, image=head)
+                            subtasks = _p.get("subtasks") or subtasks
+                        si = 0
+                        active_prompt = subtasks[si]["instruction"]
+                        sub_start_cnt = TASK_ENV.take_action_cnt
+                        cot_trace["events"].append(
+                            {"chunk": chunk_idx, "event": "replan",
+                             "plan": [s["instruction"] for s in subtasks]})
+                        if cot_ablation == "hard_reset":
+                            model.infer(dict(reset=True, prompt=active_prompt,
+                                             save_visualization=save_visualization))
+                            first = True
+                        else:
+                            model.infer(dict(switch_prompt=True,
+                                             prompt=active_prompt))
+                        continue
+                    advance = bool(v.get("subtask_done"))
+                if (advance or over_budget) and si < len(subtasks) - 1:
+                    si += 1
+                    active_prompt = subtasks[si]["instruction"]
+                    sub_start_cnt = TASK_ENV.take_action_cnt
+                    cot_trace["events"].append(
+                        {"chunk": chunk_idx, "event": "advance",
+                         "to": active_prompt,
+                         "by": ("budget" if (over_budget and not advance)
+                                else "vlm")})
+                    if cot_ablation == "hard_reset":
+                        model.infer(dict(reset=True, prompt=active_prompt,
+                                         save_visualization=save_visualization))
+                        first = True
+                    else:
+                        model.infer(dict(switch_prompt=True,
+                                         prompt=active_prompt))
       
 
         vis_dir = Path(args['save_root']) / f'stseed-{st_seed}' / 'visualization' / task_name
@@ -628,6 +764,13 @@ def eval_policy(task_name,
         )
         if TASK_ENV.eval_video_path is not None:
             TASK_ENV._del_eval_video_ffmpeg()
+
+        if cot_on:
+            cot_trace["success"] = bool(succ)
+            cot_trace["env_steps"] = int(TASK_ENV.take_action_cnt)
+            cot_trace.update(cot_planner.stats())
+            write_json(cot_trace, vis_dir /
+                       f"{TASK_ENV.test_num}_{succ}.cot.json")
 
         if succ:
             TASK_ENV.suc += 1
