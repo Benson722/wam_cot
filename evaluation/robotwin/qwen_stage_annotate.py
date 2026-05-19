@@ -210,7 +210,7 @@ def _extract_json(txt):
 
 
 def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
-                    timeout=180, retries=4, max_tokens=4096, no_think=True,
+                    timeout=600, retries=4, max_tokens=4096, no_think=True,
                     return_raw=False):
     # serve_qwen is a custom server that (probe-confirmed) IGNORES
     # enable_thinking/chat_template_kwargs/`/no_think` and writes a long
@@ -304,7 +304,7 @@ def _norm_stages(raw, length):
 
 
 def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
-          base_url, model, api_key, max_tokens, no_think):
+          base_url, model, api_key, max_tokens, no_think, timeout=600):
     """One-shot diagnostic: annotate ONLY episode 0 and DUMP the raw server
     reply + the parsed stages. Use this FIRST to confirm serve_qwen is
     answering in the expected JSON before running the full (recursive)
@@ -318,10 +318,18 @@ def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
     print(f"[probe] {dataset.name} ep{ei} L={L} task={task!r}\n"
           f"[probe] video={mp4} exists={mp4.exists()}")
     idxs = np.linspace(0, L - 1, num=min(frames_k, L), dtype=int).tolist()
+    t0 = time.time()
     frs = _read_frames(mp4, idxs)
+    print(f"[probe] decoded {len(frs)} frames in {time.time()-t0:.1f}s; "
+          f"calling VLM (max_tokens={max_tokens}, timeout={timeout}s) "
+          "-- this server is slow (~minutes), watch nvidia-smi power/util "
+          "to confirm it's alive...", flush=True)
+    tc = time.time()
     txt, resp = _vlm_stage_call(base_url, model, api_key, task, L, idxs,
                                 frs, max_tokens=max_tokens,
-                                no_think=no_think, return_raw=True)
+                                no_think=no_think, timeout=timeout,
+                                return_raw=True)
+    print(f"[probe] VLM replied in {time.time()-tc:.1f}s", flush=True)
     msg = (resp.get("choices") or [{}])[0].get("message", {})
     print("[probe] --- raw server message keys:", list(msg.keys()))
     print("[probe] --- finish_reason:",
@@ -338,8 +346,8 @@ def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
 
 
 def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
-             out_name: str, base_url, model, api_key, max_tokens=2048,
-             no_think=True, limit=0, debug=False):
+             out_name: str, base_url, model, api_key, max_tokens=4096,
+             no_think=True, limit=0, debug=False, timeout=600):
     meta = dataset / "meta"
     eps = _episodes(meta, episodes_file)
     if limit > 0:
@@ -359,16 +367,22 @@ def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
             idxs = np.linspace(0, L - 1, num=min(frames_k, L),
                                dtype=int).tolist()
             try:
+                t0 = time.time()
                 frs = _read_frames(mp4, idxs)
+                print(f"[stage] ep{ei} L={L} -> VLM "
+                      f"(mt={max_tokens})...", end="", flush=True)
                 raw = _vlm_stage_call(base_url, model, api_key, task, L,
                                       idxs, frs, max_tokens=max_tokens,
-                                      no_think=no_think)
+                                      no_think=no_think, timeout=timeout)
                 stages = _norm_stages(raw, L)
+                print(f" {len(stages)} stages in {time.time()-t0:.1f}s",
+                      flush=True)
                 if debug and not dumped:
                     print(f"[stage][debug] ep{ei} raw (first 500):\n"
                           f"{raw[:500]}\n[stage][debug] -> {stages}")
                     dumped = True
             except Exception as e:  # noqa: BLE001
+                print(" FAIL", flush=True)  # close the in-progress line
                 # First failure: print the raw reply so the cause (empty
                 # content / wrong shape / thinking) is visible, not hidden.
                 if not dumped:
@@ -419,6 +433,11 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=4096,
                     help="generation budget; this server essays before the "
                          "JSON so it needs room (default 4096)")
+    ap.add_argument("--timeout", type=int, default=600,
+                    help="per-call HTTP timeout in seconds. This serve_qwen "
+                         "is on a slow torch fallback path (~minutes/call); "
+                         "too low -> silent retries that look like a hang "
+                         "(default 600)")
     ap.add_argument("--think", action="store_true",
                     help="allow Qwen <think> reasoning (default: disabled "
                          "via /no_think + enable_thinking=False)")
@@ -444,7 +463,7 @@ def main():
             root = t[0]
         probe(root, args.cam_key, args.frames, args.episodes_file,
               args.base_url, args.model, args.api_key, args.max_tokens,
-              no_think)
+              no_think, args.timeout)
         return
     if args.recursive:
         targets = sorted({
@@ -459,13 +478,14 @@ def main():
                 annotate(t, args.cam_key, args.frames, args.episodes_file,
                          args.out_name, args.base_url, args.model,
                          args.api_key, args.max_tokens, no_think,
-                         args.limit, args.debug)
+                         args.limit, args.debug, args.timeout)
             except Exception as e:  # noqa: BLE001
                 print(f"[stage] SKIP {t}: {e}")
     else:
         annotate(root, args.cam_key, args.frames, args.episodes_file,
                  args.out_name, args.base_url, args.model, args.api_key,
-                 args.max_tokens, no_think, args.limit, args.debug)
+                 args.max_tokens, no_think, args.limit, args.debug,
+                 args.timeout)
 
 
 if __name__ == "__main__":
