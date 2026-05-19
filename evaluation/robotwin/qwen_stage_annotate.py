@@ -312,6 +312,25 @@ def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
     raise RuntimeError(f"VLM call failed after {retries}: {last}")
 
 
+def _sample_idxs(L, frames_k, stride=0):
+    """Pick the frame indices sent to the VLM.
+    - stride>0: every `stride` frames, ALWAYS including the last frame
+      (so the episode end / final stage is visible). Hard-capped at 64
+      frames so a long episode can't blow up the prompt.
+    - stride<=0 (default): `frames_k` UNIFORMLY-spaced frames over the
+      whole episode (spacing = (L-1)/(frames_k-1))."""
+    if stride and int(stride) > 0:
+        idxs = list(range(0, L, int(stride)))
+        if not idxs or idxs[-1] != L - 1:
+            idxs.append(L - 1)
+        idxs = sorted({int(i) for i in idxs if 0 <= i < L})
+        if len(idxs) > 64:
+            idxs = np.linspace(0, L - 1, 64, dtype=int).tolist()
+        return idxs
+    return np.linspace(0, L - 1, num=min(frames_k, L),
+                       dtype=int).tolist()
+
+
 def _norm_stages(raw, length):
     obj = _extract_json(raw)
     st = obj.get("stages") or []
@@ -339,7 +358,7 @@ def _norm_stages(raw, length):
 
 def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
           base_url, model, api_key, max_tokens, no_think, timeout=600,
-          prefill=False):
+          prefill=False, stride=0):
     """One-shot diagnostic: annotate ONLY episode 0 and DUMP the raw server
     reply + the parsed stages. Use this FIRST to confirm serve_qwen is
     answering in the expected JSON before running the full (recursive)
@@ -352,7 +371,9 @@ def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
     mp4 = _video_path(dataset, ei, cam)
     print(f"[probe] {dataset.name} ep{ei} L={L} task={task!r}\n"
           f"[probe] video={mp4} exists={mp4.exists()}")
-    idxs = np.linspace(0, L - 1, num=min(frames_k, L), dtype=int).tolist()
+    idxs = _sample_idxs(L, frames_k, stride)
+    print(f"[probe] sampling {len(idxs)} frames {idxs} "
+          f"(stride={stride or 'off'}, frames_k={frames_k})")
     t0 = time.time()
     frs = _read_frames(mp4, idxs)
     print(f"[probe] decoded {len(frs)} frames in {time.time()-t0:.1f}s; "
@@ -392,7 +413,7 @@ def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
 def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
              out_name: str, base_url, model, api_key, max_tokens=4096,
              no_think=True, limit=0, debug=False, timeout=600,
-             prefill=False, resume=False):
+             prefill=False, resume=False, stride=0):
     meta = dataset / "meta"
     eps = _episodes(meta, episodes_file)
     if limit > 0:
@@ -437,8 +458,7 @@ def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
             if L < 2 or not mp4.exists():
                 skip += 1
                 continue
-            idxs = np.linspace(0, L - 1, num=min(frames_k, L),
-                               dtype=int).tolist()
+            idxs = _sample_idxs(L, frames_k, stride)
             try:
                 t0 = time.time()
                 frs = _read_frames(mp4, idxs)
@@ -494,7 +514,14 @@ def main():
     ap.add_argument("--dataset", required=True)
     ap.add_argument("--cam-key", default="observation.images.cam_high")
     ap.add_argument("--frames", type=int, default=6,
-                    help="frames sampled per episode for the VLM")
+                    help="#UNIFORMLY-spaced frames per episode sent to the "
+                         "VLM (spacing=(L-1)/(frames-1)). Ignored if "
+                         "--frame-stride>0. More frames = finer stage "
+                         "boundaries but slower; 4-8 is the usual range.")
+    ap.add_argument("--frame-stride", type=int, default=0,
+                    help="sample a frame every N frames instead of a fixed "
+                         "count (last frame always included; capped at 64). "
+                         "0=off -> use --frames count mode.")
     ap.add_argument("--episodes-file", default="episodes.jsonl")
     ap.add_argument("--out-name", default="stages.jsonl")
     ap.add_argument("--recursive", action="store_true",
@@ -555,7 +582,8 @@ def main():
             root = t[0]
         probe(root, args.cam_key, args.frames, args.episodes_file,
               args.base_url, args.model, args.api_key, args.max_tokens,
-              no_think, args.timeout, args.prefill)
+              no_think, args.timeout, args.prefill,
+              stride=args.frame_stride)
         return
     if args.recursive:
         targets = sorted({
@@ -582,14 +610,16 @@ def main():
                          args.out_name, args.base_url, args.model,
                          args.api_key, args.max_tokens, no_think,
                          args.limit, args.debug, args.timeout,
-                         args.prefill, args.resume)
+                         args.prefill, args.resume,
+                         stride=args.frame_stride)
             except Exception as e:  # noqa: BLE001
                 print(f"[stage] SKIP {t}: {e}")
     else:
         annotate(root, args.cam_key, args.frames, args.episodes_file,
                  args.out_name, args.base_url, args.model, args.api_key,
                  args.max_tokens, no_think, args.limit, args.debug,
-                 args.timeout, args.prefill, args.resume)
+                 args.timeout, args.prefill, args.resume,
+                 stride=args.frame_stride)
 
 
 if __name__ == "__main__":

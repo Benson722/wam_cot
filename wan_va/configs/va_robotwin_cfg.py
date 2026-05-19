@@ -6,10 +6,24 @@ from .shared_config import va_shared_cfg
 va_robotwin_cfg = EasyDict(__name__='Config: VA robotwin')
 va_robotwin_cfg.update(va_shared_cfg)
 
-# RoboTwin post-trained weights on the server (sibling of the libero-long
-# ckpt used by the robocasa cfg). CONFIRM this path and set its
-# transformer/config.json -> "attn_mode": "torch" before serving.
-va_robotwin_cfg.wan22_pretrained_model_name_or_path = "/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/checkpoints/lingbot-va-posttrain-robotwin"
+# The server loads vae/ tokenizer/ text_encoder/ transformer/ ALL from
+# subdirs of this one path. A train.py checkpoint dir only has transformer/
+# -> symlink the other 3 from the BASE model into it (see below) before
+# pointing here. attn_mode is forced to "torch" by the server (4090-safe),
+# no config.json edit needed.
+#
+# BASE (full model, has all 4 subdirs; also the train base):
+#   /inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/checkpoints/lingbot-va-posttrain-robotwin
+# On the server, make checkpoint_step_1200 self-contained:
+#   CK=/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/train_out/checkpoints/checkpoint_step_1200
+#   BS=/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/checkpoints/lingbot-va-posttrain-robotwin
+#   ln -sfn $BS/vae $CK/vae
+#   ln -sfn $BS/tokenizer $CK/tokenizer
+#   ln -sfn $BS/text_encoder $CK/text_encoder
+#
+# NOTE: robotwin_train inherits this (va_robotwin_train_cfg .update()s this
+# cfg). To RESUME TRAINING from the original base, restore the BASE path.
+va_robotwin_cfg.wan22_pretrained_model_name_or_path = "/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/train_out/checkpoints/checkpoint_step_1200"
 
 va_robotwin_cfg.attn_window = 72
 va_robotwin_cfg.frame_chunk_size = 2

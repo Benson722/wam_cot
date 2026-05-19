@@ -6,6 +6,16 @@ import os
 va_robotwin_train_cfg = EasyDict(__name__='Config: VA robotwin train')
 va_robotwin_train_cfg.update(va_robotwin_cfg)
 
+# DECOUPLE training base from the inference cfg. va_robotwin_cfg's
+# wan22_pretrained_model_name_or_path may be repointed to a trained
+# checkpoint for eval/serving; training must ALWAYS start from the original
+# RoboTwin post-trained BASE (same base the first Latent-CoT #1 run used ->
+# apples-to-apples comparison). Pin it explicitly here so changing the
+# inference cfg can never silently change what we fine-tune from.
+va_robotwin_train_cfg.wan22_pretrained_model_name_or_path = (
+    "/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/"
+    "checkpoints/lingbot-va-posttrain-robotwin")
+
 # MULTI-TASK training: dataset_path is recursively scanned (followlinks=True)
 # for every `meta/info.json`, and all task datasets are concatenated. Point
 # it at the curated *_stable PARENT dir (symlinks to fully-downloaded tasks)
