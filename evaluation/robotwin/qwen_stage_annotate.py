@@ -401,20 +401,30 @@ def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
     ok = skip = nstage = 0
     dumped = False
     # --resume: keep episodes already in stages.jsonl, append the rest.
-    # Lets a multi-hour run survive a disconnect/kill without redoing work.
+    # Survives a disconnect/kill without redoing work AND is parallel-safe:
+    # we REWRITE the file with only the valid, de-duplicated lines first
+    # (drops any half-written trailing line from a killed run, guarantees a
+    # clean newline boundary), then append. Task-dir sharding means no two
+    # clients ever touch the same stages.jsonl, so per-file rewrite is safe.
     done = set()
     if resume and out_fp.exists():
+        kept = {}
         with open(out_fp, "r", encoding="utf-8") as fr:
             for line in fr:
                 line = line.strip()
                 if not line:
                     continue
                 try:
-                    done.add(int(json.loads(line)["episode_index"]))
+                    rec = json.loads(line)
+                    kept[int(rec["episode_index"])] = rec  # last wins
                 except Exception:  # noqa: BLE001
-                    pass
-        print(f"[stage] resume: {len(done)} episodes already done in "
-              f"{out_fp}, skipping them", flush=True)
+                    pass  # partial/corrupt line -> dropped, ep redone
+        with open(out_fp, "w", encoding="utf-8") as fw:
+            for ei_k in sorted(kept):
+                fw.write(json.dumps(kept[ei_k]) + "\n")
+        done = set(kept)
+        print(f"[stage] resume: {len(done)} valid episodes kept in "
+              f"{out_fp.name}, skipping them", flush=True)
     mode = "a" if (resume and out_fp.exists()) else "w"
     with open(out_fp, mode, encoding="utf-8") as fo:
         for ep in eps:
@@ -520,6 +530,14 @@ def main():
                          "the rest (survives a disconnect/kill on the "
                          "multi-hour full run; without it the file is "
                          "overwritten from scratch)")
+    ap.add_argument("--num-shards", type=int, default=1,
+                    help="split the task dirs into N disjoint groups for "
+                         "PARALLEL annotation (one client per serve_qwen "
+                         "instance/GPU). Each shard owns whole task dirs so "
+                         "no two clients write the same stages.jsonl.")
+    ap.add_argument("--shard", type=int, default=0,
+                    help="which shard this client handles, 0..num-shards-1 "
+                         "(targets[shard::num_shards]).")
     ap.add_argument("--probe", action="store_true",
                     help="diagnostic: dump the raw server reply for ep0 of "
                          "the (first) task and exit; writes nothing")
@@ -545,7 +563,18 @@ def main():
             if (Path(dp) / "meta" / args.episodes_file).exists()})
         if not targets:
             raise SystemExit(f"--recursive: no task dir under {root}")
-        print(f"[stage] recursive: {len(targets)} task dirs")
+        total = len(targets)
+        ns = max(1, int(args.num_shards))
+        if ns > 1:
+            sh = int(args.shard)
+            if not (0 <= sh < ns):
+                raise SystemExit(
+                    f"--shard {sh} out of range [0,{ns-1}]")
+            targets = targets[sh::ns]
+            print(f"[stage] shard {sh}/{ns}: {len(targets)}/{total} task "
+                  f"dirs -> {[t.name for t in targets]}")
+        else:
+            print(f"[stage] recursive: {total} task dirs")
         for i, t in enumerate(targets):
             print(f"[stage] ({i+1}/{len(targets)}) {t}")
             try:
