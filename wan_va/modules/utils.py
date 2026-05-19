@@ -44,22 +44,20 @@ def load_transformer(
     torch_device,
     **kwargs
 ):
-    # low_cpu_mem_usage=False: do NOT use accelerate's meta-device fast path.
-    # Modules added after the checkpoint was saved (e.g. the Latent-CoT #1
-    # `kf_aux_head`, absent from every released ckpt) would otherwise remain
-    # as meta tensors and crash on `model.to(device)` with
-    # "Cannot copy out of meta tensor; no data". Eager init keeps such
-    # from-scratch heads at their (random) constructor init, which is exactly
-    # what we want; loaded weights are unaffected.
-    kwargs.setdefault("low_cpu_mem_usage", False)
+    # NOTE: this diffusers build forbids low_cpu_mem_usage=False when the
+    # model has keep_in_fp32_modules, so we MUST keep the accelerate
+    # meta-device load path. Consequence: modules added after the checkpoint
+    # was saved (the Latent-CoT #1 `kf_aux_head`, absent from every released
+    # ckpt) come back as **meta** tensors and would crash the subsequent
+    # `model.to(device)` ("Cannot copy out of meta tensor; no data").
+    # Fix: detect the still-meta submodules and materialize + (re)initialize
+    # ONLY those (a fresh from-scratch head -> random init is exactly right);
+    # loaded pretrained weights are never touched.
     model = WanTransformer3DModel.from_pretrained(
         transformer_path,
         torch_dtype=torch_dtype,
         **kwargs
     )
-    # Safety net: if any param/buffer is STILL on meta (some diffusers
-    # versions keep missing keys on meta regardless), materialize + re-init
-    # only those submodules; loaded weights stay untouched.
     meta_mods = set()
     for n, p in list(model.named_parameters()):
         if getattr(p, "is_meta", False):
@@ -68,16 +66,12 @@ def load_transformer(
         if getattr(b, "is_meta", False):
             meta_mods.add(n.rsplit(".", 1)[0])
     for mod_name in sorted(meta_mods):
-        try:
-            sub = model.get_submodule(mod_name)
-            sub.to_empty(device="cpu")
-            for m in sub.modules():
-                if hasattr(m, "reset_parameters"):
-                    m.reset_parameters()
-        except Exception:  # noqa: BLE001
-            pass
-    if meta_mods:
-        model = model.to(torch_dtype)
+        sub = model.get_submodule(mod_name)
+        sub.to_empty(device="cpu")          # meta -> real (uninitialized)
+        for m in sub.modules():
+            if hasattr(m, "reset_parameters"):
+                m.reset_parameters()        # proper random init
+        sub.to(torch_dtype)                 # match model compute dtype only
     return model.to(torch_device)
 
 
