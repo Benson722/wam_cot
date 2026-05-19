@@ -585,7 +585,7 @@ class Trainer:
         backbone representation whether or not #1 was trained (stock ckpt =>
         stock backbone hidden; #1 ckpt => #1-shaped hidden)."""
         self.transformer.eval()
-        feats, stages, eps = [], [], []
+        feats, stages, vstages, eps = [], [], [], []
         n = 0
         for bi in range(int(num_batches)):
             batch = self.convert_input_format(self._get_next_batch())
@@ -602,11 +602,19 @@ class Trainer:
             kf_feat = out[3].float().cpu()          # [B, F_lat, d]
             st = batch['kf_stage'].cpu()            # [B, F_lat]
             ep = batch['kf_episode'].cpu()          # [B]
+            # VLM semantic-stage label (stages.jsonl) if the loader emits it
+            # (cfg.vlm_stage_aux=True). -1 = unlabeled frame (probe drops it).
+            vst = batch.get('vlm_stage')
+            vst = vst.cpu() if vst is not None else None
             B, F = kf_feat.shape[0], kf_feat.shape[1]
             m = min(F, st.shape[1])
+            if vst is not None:
+                m = min(m, vst.shape[1])
             for b in range(B):
                 feats.append(kf_feat[b, :m])
                 stages.append(st[b, :m])
+                if vst is not None:
+                    vstages.append(vst[b, :m])
                 eps.append(st[b, :m].clone().fill_(int(ep[b])))
             n += B
             if self.config.rank == 0 and (bi + 1) % 10 == 0:
@@ -614,18 +622,26 @@ class Trainer:
                             f"({n} samples)")
         import torch as _t
         X = _t.cat(feats, 0)                        # [N, d]
-        y = _t.cat(stages, 0).long()                # [N]
-        g = _t.cat(eps, 0).long()                   # [N]
+        y = _t.cat(stages, 0).long()                # [N]  kf-derived stage
+        g = _t.cat(eps, 0).long()                   # [N]  episode id
+        vy = _t.cat(vstages, 0).long() if vstages else None  # [N] VLM stage
         if self.config.rank == 0:
             os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".",
                         exist_ok=True)
-            _t.save({"feat": X, "stage": y, "episode": g,
-                     "ckpt": getattr(self.config,
-                                     "wan22_pretrained_model_name_or_path",
-                                     "?")}, out_path)
+            dump = {"feat": X, "stage": y, "episode": g,
+                    "ckpt": getattr(self.config,
+                                    "wan22_pretrained_model_name_or_path",
+                                    "?")}
+            if vy is not None:
+                dump["vlm_stage"] = vy
+            _t.save(dump, out_path)
+            vinfo = (f" vlm_stages={int(vy[vy >= 0].max())+1}"
+                     f" (labeled {int((vy >= 0).sum())}/{vy.numel()})"
+                     if vy is not None and (vy >= 0).any()
+                     else " vlm_stage=ABSENT")
             logger.info(f"[probe-collect] wrote {out_path} "
                         f"feat={tuple(X.shape)} N={X.shape[0]} "
-                        f"stages={int(y.max())+1}")
+                        f"kf_stages={int(y.max())+1}{vinfo}")
         if dist.is_initialized():
             dist.barrier()
 

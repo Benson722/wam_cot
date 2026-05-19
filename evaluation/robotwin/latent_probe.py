@@ -232,6 +232,13 @@ def main():
                     help="latents/<cam> to probe (else cfg.obs_cam_keys[0])")
     ap.add_argument("--features", choices=["z_latent", "h_hidden"],
                     default="z_latent")
+    ap.add_argument("--label", choices=["kf_stage", "vlm_stage"],
+                    default="kf_stage",
+                    help="probe target. vlm_stage = the Qwen stages.jsonl "
+                         "milestones (richer, multi-class); only available "
+                         "for h_hidden dumps collected with "
+                         "cfg.vlm_stage_aux=True. Frames with label -1 "
+                         "(unlabeled) are dropped.")
     ap.add_argument("--hidden-dump", default=None,
                     help="(h_hidden) .pt produced by `wan_va.train "
                          "--probe-collect` for the ckpt to probe")
@@ -255,11 +262,24 @@ def main():
         import torch
         d = torch.load(args.hidden_dump, map_location="cpu",
                         weights_only=False)
+        cfg = None  # not loaded on the h_hidden path (no lerobot import)
         X = np.asarray(d["feat"], dtype=np.float32)
-        y = np.asarray(d["stage"], dtype=np.int64)
+        if args.label == "vlm_stage":
+            if d.get("vlm_stage") is None:
+                raise SystemExit(
+                    "--label vlm_stage: this dump has no vlm_stage. "
+                    "Re-collect with the updated wan_va.train AND "
+                    "cfg.vlm_stage_aux=True + stages.jsonl present.")
+            y = np.asarray(d["vlm_stage"], dtype=np.int64)
+        else:
+            y = np.asarray(d["stage"], dtype=np.int64)
         g = np.asarray(d["episode"], dtype=np.int64)
+        # drop unlabeled frames (VLM stage uses -1 outside annotated range)
+        keep = y >= 0
+        X, y, g = X[keep], y[keep], g[keep]
         print(f"[probe] h_hidden dump={args.hidden_dump} "
-              f"ckpt={d.get('ckpt','?')}")
+              f"label={args.label} ckpt={d.get('ckpt','?')} "
+              f"kept={int(keep.sum())}/{keep.size}")
     else:
         # NOTE: configs are pure easydict (no lerobot in the import chain);
         # the z_latent probe reads .pth latents directly, so lerobot is NOT
@@ -288,7 +308,9 @@ def main():
     res = {
         "config": args.config,
         "feature_type": args.features,
-        "dataset_path": str(cfg.dataset_path),
+        "label": args.label,
+        "dataset_path": (str(cfg.dataset_path) if cfg is not None
+                         else str(d.get("ckpt", "?"))),
         "n_samples": int(len(X)),
         "n_episodes": int(len(np.unique(g))),
         "feature_dim": int(X.shape[1]),
@@ -302,7 +324,7 @@ def main():
     }
     out = Path(args.out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    tag = f"{args.config}_{args.features}"
+    tag = f"{args.config}_{args.features}_{args.label}"
     with open(out / f"results_{tag}.json", "w", encoding="utf-8") as f:
         json.dump(res, f, indent=2, ensure_ascii=False)
     try:
