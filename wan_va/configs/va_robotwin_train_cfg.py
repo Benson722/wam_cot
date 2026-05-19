@@ -22,4 +22,16 @@ va_robotwin_train_cfg.weight_decay = 0.1
 va_robotwin_train_cfg.warmup_steps = 10
 va_robotwin_train_cfg.batch_size = 1 
 va_robotwin_train_cfg.gradient_accumulation_steps = 1
-va_robotwin_train_cfg.num_steps = 50000 
+va_robotwin_train_cfg.num_steps = 50000
+
+# ---- Latent-CoT #1: keyframe auxiliary head (see latent_plan.md) --------
+# Defaults are a strict NO-OP: kf_aux=False -> dataset adds no keys, no head,
+# no loss term -> baseline training byte-identical. To enable:
+#   1) python evaluation/robotwin/keyframe_annotate.py --dataset <ds>
+#      -> writes <ds>/meta/keyframes.jsonl
+#   2) set kf_aux=True and kf_aux_weight>0 here (lambda_kf; plan suggests
+#      0.1 ramping down to 0.05).
+# kf_file: annotation filename under <dataset>/meta/.
+va_robotwin_train_cfg.kf_aux = False
+va_robotwin_train_cfg.kf_aux_weight = 0.0
+va_robotwin_train_cfg.kf_file = 'keyframes.jsonl'

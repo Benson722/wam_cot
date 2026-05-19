@@ -6,6 +6,7 @@ import numpy as np
 from pathlib import Path
 from collections.abc import Callable
 import os
+import json
 from tqdm import tqdm
 from multiprocessing import Pool
 from functools import partial
@@ -190,6 +191,36 @@ class LatentLeRobotDataset(LeRobotDataset):
                 return False
         return True
 
+    def _load_keyframes(self):
+        """Lazy, backward-compatible keyframe map for Latent-CoT #1.
+
+        Returns {episode_index: sorted np.int64[keyframe raw-frame idx]}.
+        Empty (and zero training effect) unless ``cfg.kf_aux`` is set AND
+        ``<dataset>/meta/<kf_file>`` exists (produced by
+        evaluation/robotwin/keyframe_annotate.py)."""
+        if hasattr(self, "_kf_map"):
+            return self._kf_map
+        self._kf_map = {}
+        if not getattr(self.config, "kf_aux", False):
+            return self._kf_map
+        fp = Path(self.latent_path).parent / "meta" / getattr(
+            self.config, "kf_file", "keyframes.jsonl")
+        if not os.path.exists(fp):
+            print(f"[kf_aux] {fp} not found; keyframe aux yields all-masked "
+                  f"targets (no effect). Run keyframe_annotate.py first.")
+            return self._kf_map
+        with open(fp, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                d = json.loads(line)
+                self._kf_map[int(d["episode_index"])] = np.asarray(
+                    sorted(int(x) for x in d["keyframes"]), dtype=np.int64)
+        print(f"[kf_aux] loaded keyframes for {len(self._kf_map)} episodes "
+              f"from {fp}")
+        return self._kf_map
+
     def _get_global_idx(self, episode_index: int, local_index: int):
         ep_start = self.episode_data_index["from"][episode_index]
         return local_index + ep_start
@@ -306,6 +337,27 @@ class LatentLeRobotDataset(LeRobotDataset):
         out_dict['actions'], out_dict['actions_mask'] = self._action_post_process(local_start_frame, local_end_frame, latent_frame_ids, ori_data_dict['action'])
 
         out_dict['latents'] = out_dict['latents'].permute(3, 0, 1, 2)
+
+        # ---- Latent-CoT #1: per-latent-frame distance to next keyframe ---
+        # Opt-in (cfg.kf_aux). Aligned to the SAME latent timesteps the model
+        # sees (latent_frame_ids subsampled ~4x, matching the action rearrange
+        # f=latent_frame_num). Absent annotation -> all-masked (zero loss).
+        if getattr(self.config, "kf_aux", False):
+            kf_map = self._load_keyframes()
+            fids = np.asarray(latent_frame_ids, dtype=np.int64).reshape(-1)
+            lat_n = (len(fids) - 1) // 4 + 1
+            kfs = kf_map.get(int(episode_index))
+            dist = np.zeros(lat_n, dtype=np.float32)
+            mask = np.zeros(lat_n, dtype=bool)
+            if kfs is not None and kfs.size > 0:
+                for i in range(lat_n):
+                    rep = int(fids[min(i * 4, len(fids) - 1)])
+                    nxt = kfs[kfs >= rep]
+                    if nxt.size > 0:
+                        dist[i] = float(nxt[0] - rep)
+                        mask[i] = True
+            out_dict['kf_dist'] = torch.from_numpy(dist)
+            out_dict['kf_mask'] = torch.from_numpy(mask)
         return out_dict
 
     def __len__(self):
