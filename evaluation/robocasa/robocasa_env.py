@@ -68,15 +68,18 @@ class RobocasaConfig:
             "robot0_eye_in_hand": "observation.images.eye_in_hand_rgb",
         }
     )
-    # Fallback agentview candidates tried (in order) if the mapped key is absent.
+    # Fallback agentview candidates tried (in order) if the mapped key is
+    # absent. MUST be real robosuite camera names — requesting a non-existent
+    # camera makes robosuite raise inside _setup_observables at env.reset().
+    # Verified-available Robocasa kitchen cameras (probe): robot0_agentview_
+    # {center,left,right}, robot0_frontview, robot0_robotview, robot0_eye_in_hand.
     agentview_fallbacks: Tuple[str, ...] = (
         "robot0_agentview_center",
         "robot0_agentview_right",
-        "agentview",
         "robot0_frontview",
-        "frontview",
+        "robot0_robotview",
     )
-    eye_in_hand_fallbacks: Tuple[str, ...] = ("robot0_eye_in_hand", "eye_in_hand")
+    eye_in_hand_fallbacks: Tuple[str, ...] = ("robot0_eye_in_hand",)
     # robosuite renders camera images upside-down (origin bottom-left); the
     # LIBERO client flips with [::-1]. Keep True unless the probe preview looks
     # flipped the other way.
@@ -264,11 +267,27 @@ class RobocasaEnv:
             ignore_done=True,
             translucent_robot=cfg.translucent_robot,
         )
-        # Render every camera we might need (mapped + fallbacks).
+        # Render every camera we might need (mapped + fallbacks), but HARD
+        # FILTER to cameras that actually exist — a bogus name makes
+        # robosuite raise in _setup_observables at every env.reset().
         cams = list(cfg.camera_map.keys()) + list(cfg.agentview_fallbacks) + list(
             cfg.eye_in_hand_fallbacks
         )
-        env_kwargs["camera_names"] = sorted(set(cams))
+        valid = set(VALID_ROBOCASA_CAMERAS)
+        kept, dropped = [], []
+        for c in cams:
+            (kept if c in valid else dropped).append(c)
+        if dropped:
+            logger.warning(
+                "Dropping camera names not in Robocasa allowlist: %s",
+                sorted(set(dropped)),
+            )
+        if not kept:
+            raise RuntimeError(
+                "No valid Robocasa cameras requested; check camera_map. "
+                f"Allowlist={VALID_ROBOCASA_CAMERAS}"
+            )
+        env_kwargs["camera_names"] = sorted(set(kept))
         if cfg.layout_ids is not None:
             env_kwargs["layout_ids"] = cfg.layout_ids
         if cfg.style_ids is not None:
@@ -521,4 +540,17 @@ PROBE_FALLBACK_ENVS: Tuple[str, ...] = (
     "PickPlaceCounterToMicrowave",
     "OpenDrawer",
     "OpenCabinet",
+)
+
+# Cameras that actually exist on the Robocasa kitchen / PandaOmron setup
+# (probe-confirmed). Requesting anything outside this set makes robosuite
+# raise inside _setup_observables at env.reset(), so the requested
+# camera_names list is hard-filtered to this allowlist.
+VALID_ROBOCASA_CAMERAS: Tuple[str, ...] = (
+    "robot0_agentview_center",
+    "robot0_agentview_left",
+    "robot0_agentview_right",
+    "robot0_frontview",
+    "robot0_robotview",
+    "robot0_eye_in_hand",
 )
