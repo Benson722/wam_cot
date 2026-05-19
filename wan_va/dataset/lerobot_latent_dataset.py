@@ -48,9 +48,20 @@ def construct_lerobot_multi_processor(config,
     )
     repo_list = recursive_find_file(config.dataset_path, 'info.json')
     repo_list = [v.split('/meta/info.json')[0] for v in repo_list]
-    with Pool(num_init_worker) as pool:
-        datasets_out_lst = pool.map(construct_func, repo_list)
-                
+    # NEVER spawn more workers than repos. Crucially, multiprocessing.Pool
+    # forks workers; doing that AFTER the transformer is on CUDA and
+    # NCCL/FSDP are initialized deadlocks (CUDA/NCCL are not fork-safe) —
+    # the default num_init_worker=128 forked 128 procs even for ONE repo
+    # and hung at "Setting up datasets...". For a single repo build it
+    # serially in-process (no fork at all); only use a Pool for genuine
+    # multi-repo parallelism, capped to len(repo_list).
+    n_workers = max(1, min(int(num_init_worker), len(repo_list)))
+    if n_workers <= 1:
+        datasets_out_lst = [construct_func(r) for r in repo_list]
+    else:
+        with Pool(n_workers) as pool:
+            datasets_out_lst = pool.map(construct_func, repo_list)
+
     return datasets_out_lst
 
 def get_relative_pose(pose):
