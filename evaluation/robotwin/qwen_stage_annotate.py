@@ -260,7 +260,9 @@ def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
         # instead of narrating (works iff the server doesn't re-open a
         # fresh assistant turn; harmless otherwise — extractor still runs).
         messages.append({"role": "assistant", "content": _PREFIX})
-    base_payload = {"model": model, "temperature": 0.1,
+    # temperature 0 -> serve_qwen sets do_sample=False -> greedy: faster,
+    # deterministic, and best for strict-JSON extraction.
+    base_payload = {"model": model, "temperature": 0.0,
                     "max_tokens": int(max_tokens), "stream": False,
                     "messages": messages}
     extras = {"response_format": {"type": "json_object"}}
@@ -390,7 +392,7 @@ def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
 def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
              out_name: str, base_url, model, api_key, max_tokens=4096,
              no_think=True, limit=0, debug=False, timeout=600,
-             prefill=False):
+             prefill=False, resume=False):
     meta = dataset / "meta"
     eps = _episodes(meta, episodes_file)
     if limit > 0:
@@ -398,9 +400,27 @@ def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
     out_fp = meta / out_name
     ok = skip = nstage = 0
     dumped = False
-    with open(out_fp, "w", encoding="utf-8") as fo:
+    # --resume: keep episodes already in stages.jsonl, append the rest.
+    # Lets a multi-hour run survive a disconnect/kill without redoing work.
+    done = set()
+    if resume and out_fp.exists():
+        with open(out_fp, "r", encoding="utf-8") as fr:
+            for line in fr:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    done.add(int(json.loads(line)["episode_index"]))
+                except Exception:  # noqa: BLE001
+                    pass
+        print(f"[stage] resume: {len(done)} episodes already done in "
+              f"{out_fp}, skipping them", flush=True)
+    mode = "a" if (resume and out_fp.exists()) else "w"
+    with open(out_fp, mode, encoding="utf-8") as fo:
         for ep in eps:
             ei = int(ep["episode_index"])
+            if ei in done:
+                continue
             L = int(ep.get("length", 0))
             task = (ep.get("tasks") or [""])[0]
             mp4 = _video_path(dataset, ei, cam)
@@ -495,6 +515,11 @@ def main():
                     help="seed the assistant turn with '{\"stages\": [' so "
                          "the model continues JSON instead of narrating "
                          "(strongest anti-essay lever for this server)")
+    ap.add_argument("--resume", action="store_true",
+                    help="skip episodes already in stages.jsonl and APPEND "
+                         "the rest (survives a disconnect/kill on the "
+                         "multi-hour full run; without it the file is "
+                         "overwritten from scratch)")
     ap.add_argument("--probe", action="store_true",
                     help="diagnostic: dump the raw server reply for ep0 of "
                          "the (first) task and exit; writes nothing")
@@ -528,14 +553,14 @@ def main():
                          args.out_name, args.base_url, args.model,
                          args.api_key, args.max_tokens, no_think,
                          args.limit, args.debug, args.timeout,
-                         args.prefill)
+                         args.prefill, args.resume)
             except Exception as e:  # noqa: BLE001
                 print(f"[stage] SKIP {t}: {e}")
     else:
         annotate(root, args.cam_key, args.frames, args.episodes_file,
                  args.out_name, args.base_url, args.model, args.api_key,
                  args.max_tokens, no_think, args.limit, args.debug,
-                 args.timeout, args.prefill)
+                 args.timeout, args.prefill, args.resume)
 
 
 if __name__ == "__main__":
