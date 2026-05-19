@@ -6,10 +6,17 @@ import os
 va_robotwin_train_cfg = EasyDict(__name__='Config: VA robotwin train')
 va_robotwin_train_cfg.update(va_robotwin_cfg)
 
-# H200 server: a single RoboTwin task in LeRobot format (already downloaded).
-# `dataset_path` is recursively scanned for `meta/info.json`, so point it at
-# the task dir (or a parent dir holding several such task dirs).
-va_robotwin_train_cfg.dataset_path = '/inspire/qb-ilm2/project/26summer-camp-11/public/group3/lingbot-robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_aug_500/adjust_bottle-aloha-agilex_randomized_500-1000'
+# MULTI-TASK training: dataset_path is recursively scanned (followlinks=True)
+# for every `meta/info.json`, and all task datasets are concatenated. Point
+# it at the curated *_stable PARENT dir (symlinks to fully-downloaded tasks)
+# for joint multi-task training (better generalization). For SINGLE-task,
+# set it back to one task dir, e.g.
+#   .../lerobot_robotwin_eef_aug_500/adjust_bottle-aloha-agilex_randomized_500-1000
+# PREREQUISITE: every task dir under it must have meta/keyframes.jsonl
+# (kf_aux=True) -> run once:
+#   python evaluation/robotwin/keyframe_annotate.py \
+#     --dataset <this path> --recursive --gripper-idx 7 15
+va_robotwin_train_cfg.dataset_path = '/inspire/qb-ilm2/project/26summer-camp-11/public/group3/lingbot-robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_aug_500_stable'
 # empty_emb.pt (CFG null-prompt text embedding) is SHARED at the dataset
 # tree ROOT (one file for all task dirs), not inside each task dir. Point
 # at the official shared file. (If absent, regenerate with
