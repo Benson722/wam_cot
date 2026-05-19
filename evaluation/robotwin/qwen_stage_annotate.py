@@ -98,20 +98,57 @@ def _read_frames(mp4: Path, idxs):
             "(av1 support).")
 
 
+import re as _re
+
+_THINK_RE = _re.compile(r"<think>.*?</think>", _re.DOTALL)
+
+
+def _extract_text(resp):
+    """Pull the answer out of an OpenAI-style reply, tolerating Qwen3
+    thinking models: prefer `content`; if empty fall back to
+    `reasoning_content`; strip any <think>...</think> block (and a
+    dangling unmatched <think> with no answer after it). Returns
+    (text, finish_reason)."""
+    ch = (resp.get("choices") or [{}])[0]
+    msg = ch.get("message") or {}
+    fr = ch.get("finish_reason")
+    txt = (msg.get("content") or "").strip()
+    if not txt:
+        txt = (msg.get("reasoning_content") or "").strip()
+    txt = _THINK_RE.sub("", txt)
+    # unmatched leading <think> with the answer never produced
+    if "<think>" in txt and "</think>" not in txt:
+        txt = txt.split("<think>", 1)[0].strip()
+    return txt.strip(), fr
+
+
 def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
-                    timeout=120, retries=4):
+                    timeout=180, retries=4, max_tokens=2048, no_think=True,
+                    return_raw=False):
+    # Qwen3.5 is a reasoning model: with a small max_tokens it burns the
+    # whole budget inside <think> and emits an EMPTY content (-> the
+    # "Expecting value: line 1 column 1" you saw). Give it room AND ask it
+    # to skip thinking. We don't know serve_qwen's exact API surface, so
+    # we disable thinking three redundant ways (harmless if unsupported):
+    #   * chat_template_kwargs.enable_thinking=False (Qwen chat template)
+    #   * top-level enable_thinking=False
+    #   * a `/no_think` soft-switch token in the user text
+    hint = " /no_think" if no_think else ""
     content = [{"type": "text", "text":
                 f"TASK: {task}\nEPISODE LENGTH (frames): {length}\n"
                 f"The {len(frames)} images are frames at indices "
                 f"{list(idxs)} (chronological). Output the ordered stages "
-                "with integer start_frame."}]
-    for fr in frames:
+                f"with integer start_frame.{hint}"}]
+    for fr_img in frames:
         content.append({"type": "image_url",
-                        "image_url": {"url": _img_to_data_url(fr)}})
-    payload = {"model": model, "temperature": 0.1, "max_tokens": 512,
-               "stream": False,
+                        "image_url": {"url": _img_to_data_url(fr_img)}})
+    payload = {"model": model, "temperature": 0.1,
+               "max_tokens": int(max_tokens), "stream": False,
                "messages": [{"role": "system", "content": _SYS},
                             {"role": "user", "content": content}]}
+    if no_think:
+        payload["enable_thinking"] = False
+        payload["chat_template_kwargs"] = {"enable_thinking": False}
     base = base_url.rstrip("/")
     url = base + ("/chat/completions" if base.endswith("/v1")
                   else "/v1/chat/completions")
@@ -125,8 +162,16 @@ def _vlm_stage_call(base_url, model, api_key, task, length, idxs, frames,
                          "Authorization": f"Bearer {api_key}"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 resp = json.loads(r.read().decode())
-            return resp["choices"][0]["message"]["content"]
-        except (urllib.error.URLError, KeyError, TimeoutError,
+            txt, fin = _extract_text(resp)
+            if not txt:
+                # 200 but empty -> almost always truncated thinking;
+                # surface it so the caller can log the raw reply.
+                raise ValueError(
+                    f"empty content (finish_reason={fin}); likely "
+                    f"max_tokens={max_tokens} too small or thinking not "
+                    f"disabled")
+            return (txt, resp) if return_raw else txt
+        except (urllib.error.URLError, KeyError, TimeoutError, ValueError,
                 json.JSONDecodeError) as e:  # noqa: PERF203
             last = e
             time.sleep(min(2 ** a, 8))
@@ -158,12 +203,50 @@ def _norm_stages(raw, length):
     return fixed[:6]
 
 
+def probe(dataset: Path, cam: str, frames_k: int, episodes_file: str,
+          base_url, model, api_key, max_tokens, no_think):
+    """One-shot diagnostic: annotate ONLY episode 0 and DUMP the raw server
+    reply + the parsed stages. Use this FIRST to confirm serve_qwen is
+    answering in the expected JSON before running the full (recursive)
+    pass. Writes nothing."""
+    meta = dataset / "meta"
+    ep = _episodes(meta, episodes_file)[0]
+    ei = int(ep["episode_index"])
+    L = int(ep.get("length", 0))
+    task = (ep.get("tasks") or [""])[0]
+    mp4 = _video_path(dataset, ei, cam)
+    print(f"[probe] {dataset.name} ep{ei} L={L} task={task!r}\n"
+          f"[probe] video={mp4} exists={mp4.exists()}")
+    idxs = np.linspace(0, L - 1, num=min(frames_k, L), dtype=int).tolist()
+    frs = _read_frames(mp4, idxs)
+    txt, resp = _vlm_stage_call(base_url, model, api_key, task, L, idxs,
+                                frs, max_tokens=max_tokens,
+                                no_think=no_think, return_raw=True)
+    msg = (resp.get("choices") or [{}])[0].get("message", {})
+    print("[probe] --- raw server message keys:", list(msg.keys()))
+    print("[probe] --- finish_reason:",
+          (resp.get("choices") or [{}])[0].get("finish_reason"))
+    print("[probe] --- usage:", resp.get("usage"))
+    print("[probe] --- extracted text (first 800 chars):\n"
+          + txt[:800])
+    stages = _norm_stages(txt, L)
+    print(f"[probe] --- PARSED {len(stages)} stages:")
+    for s in stages:
+        print(f"          start_frame={s['start_frame']:>4d}  {s['name']}")
+    print("[probe] OK -- serve_qwen is answering; safe to run the full "
+          "pass (drop --probe).")
+
+
 def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
-             out_name: str, base_url, model, api_key):
+             out_name: str, base_url, model, api_key, max_tokens=2048,
+             no_think=True, limit=0, debug=False):
     meta = dataset / "meta"
     eps = _episodes(meta, episodes_file)
+    if limit > 0:
+        eps = eps[:limit]
     out_fp = meta / out_name
     ok = skip = nstage = 0
+    dumped = False
     with open(out_fp, "w", encoding="utf-8") as fo:
         for ep in eps:
             ei = int(ep["episode_index"])
@@ -178,9 +261,29 @@ def annotate(dataset: Path, cam: str, frames_k: int, episodes_file: str,
             try:
                 frs = _read_frames(mp4, idxs)
                 raw = _vlm_stage_call(base_url, model, api_key, task, L,
-                                      idxs, frs)
+                                      idxs, frs, max_tokens=max_tokens,
+                                      no_think=no_think)
                 stages = _norm_stages(raw, L)
+                if debug and not dumped:
+                    print(f"[stage][debug] ep{ei} raw (first 500):\n"
+                          f"{raw[:500]}\n[stage][debug] -> {stages}")
+                    dumped = True
             except Exception as e:  # noqa: BLE001
+                # First failure: print the raw reply so the cause (empty
+                # content / wrong shape / thinking) is visible, not hidden.
+                if not dumped:
+                    try:
+                        _t, _r = _vlm_stage_call(
+                            base_url, model, api_key, task, L, idxs,
+                            _read_frames(mp4, idxs), max_tokens=max_tokens,
+                            no_think=no_think, return_raw=True)
+                    except Exception as e2:  # noqa: BLE001
+                        print(f"[stage][debug] ep{ei} raw call still "
+                              f"failing: {e2}")
+                    else:
+                        print(f"[stage][debug] ep{ei} server replied but "
+                              f"parse failed; text head:\n{_t[:500]}")
+                    dumped = True
                 print(f"[stage] ep{ei} SKIP: {e}")
                 skip += 1
                 continue
@@ -213,9 +316,36 @@ def main():
     ap.add_argument("--model",
                     default=_cred("VLLM_MODEL", HARDCODED_VLLM_MODEL))
     ap.add_argument("--api-key", default=_cred("VLLM_API_KEY", "EMPTY"))
+    ap.add_argument("--max-tokens", type=int, default=2048,
+                    help="generation budget; reasoning models need room "
+                         "or `content` comes back empty (default 2048)")
+    ap.add_argument("--think", action="store_true",
+                    help="allow Qwen <think> reasoning (default: disabled "
+                         "via /no_think + enable_thinking=False)")
+    ap.add_argument("--limit", type=int, default=0,
+                    help="only annotate the first N episodes per task "
+                         "(0=all; use a small N for a quick smoke test)")
+    ap.add_argument("--debug", action="store_true",
+                    help="print the first raw VLM reply per task dir")
+    ap.add_argument("--probe", action="store_true",
+                    help="diagnostic: dump the raw server reply for ep0 of "
+                         "the (first) task and exit; writes nothing")
     args = ap.parse_args()
+    no_think = not args.think
 
     root = Path(args.dataset)
+    if args.probe:
+        if args.recursive:
+            t = sorted({
+                Path(dp) for dp, _d, _f in os.walk(root, followlinks=True)
+                if (Path(dp) / "meta" / args.episodes_file).exists()})
+            if not t:
+                raise SystemExit(f"--probe: no task dir under {root}")
+            root = t[0]
+        probe(root, args.cam_key, args.frames, args.episodes_file,
+              args.base_url, args.model, args.api_key, args.max_tokens,
+              no_think)
+        return
     if args.recursive:
         targets = sorted({
             Path(dp) for dp, _d, _f in os.walk(root, followlinks=True)
@@ -228,12 +358,14 @@ def main():
             try:
                 annotate(t, args.cam_key, args.frames, args.episodes_file,
                          args.out_name, args.base_url, args.model,
-                         args.api_key)
+                         args.api_key, args.max_tokens, no_think,
+                         args.limit, args.debug)
             except Exception as e:  # noqa: BLE001
                 print(f"[stage] SKIP {t}: {e}")
     else:
         annotate(root, args.cam_key, args.frames, args.episodes_file,
-                 args.out_name, args.base_url, args.model, args.api_key)
+                 args.out_name, args.base_url, args.model, args.api_key,
+                 args.max_tokens, no_think, args.limit, args.debug)
 
 
 if __name__ == "__main__":
