@@ -83,10 +83,17 @@ fi
 
 ## cmd setting
 export TOKENIZERS_PARALLELISM=false
+# Per-rank logs to disk so a non-rank-0 failure's real traceback is captured
+# (--local-ranks-filter only tees rank 0 to console; other ranks were silent).
+TORCHRUN_LOG_DIR=${TORCHRUN_LOG_DIR:-./train_out/torchrun_logs}
+mkdir -p "$TORCHRUN_LOG_DIR"
+echo "[run_va_posttrain] per-rank logs -> $TORCHRUN_LOG_DIR/<run>/<rank>/{stdout,stderr}.log"
 PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True" TORCHFT_LIGHTHOUSE=${torchft_lighthouse} \
 python -m torch.distributed.run \
     --nproc_per_node=${num_gpu} \
     --local-ranks-filter=${log_rank} \
     --master_port ${master_port} \
+    --log-dir "$TORCHRUN_LOG_DIR" \
+    --redirects 3 \
     --tee 3 \
     -m wan_va.train --config-name ${config_name} $overrides
