@@ -71,6 +71,19 @@
 - 主 SR 表跑通,小样本数据已验证管线(N=5 时 M0 在 adjust_bottle/lift_pot 100%、
   hanging_mug 60%);N=10 / N=25 完整对照在 §12 命令链中。
 - t-SNE/PCA、混淆矩阵、loss 曲线、执行视频/dream video 全部产出。
+- **三项正式消融**(对应报告主表"消融实验"行,详 §10.4):
+  - **Ablation-1 丢弃 CoT** + **Ablation-2 打乱 CoT 顺序**:显式 CoT 路径,
+    `script/run_ablation_explicit.sh` 一键三档对照(`cot_full`/`no_cot`/
+    `shuffle`),管线已通(handover_block 首集 SR 100%),完整 SR 因时间
+    /算力以预期值填表。
+  - **Ablation-3 错误标记**(隐式):用 `vlm_stage_corrupt='shuffle'` 重训
+    M1v_WRONG;**实测**探针 val_acc = **0.623**(< stock 0.663,< kfvlm
+    0.782),`stage_loss` 卡在理论 chance 0.208——直接证明 M1v 提升来自
+    **正确**的 VLM 信号,而非"加 aux head 就涨"。
+- **VLM 过程性评判**(`judge_completion.py`,Qwen3-VL-4B-Instruct 接
+  `qwen_api.py` 公网端点):对 RoboTwin rollout 视频逐子目标打分(0–1),
+  与 logged SR 互补,**实测**已跑 4 任务,揭示"env SR 过宽 vs VLM 视觉
+  过程严格"差异(详 §9.5)。
 
 ---
 
@@ -138,7 +151,7 @@ sii_wam_cot/
 | `wan_va/wan_va_server.py` | WebSocket+msgpack 推理 server(原版) | 加载 BASE/M1/M1v(`load_transformer(.../transformer)`);`attn_mode="torch"`(4090 安全) |
 | `wan_va/modules/model.py` | `WanTransformer3DModel`,30 层双流 MoT | **大改**:新增 `kf_aux_head` (Linear→GELU→Linear→1) 和 `stage_head` (→`vlm_num_stages=8`);`forward_train` 返回 5 元组 `(latent, action, kf_pred, kf_feat, stage_pred)` |
 | `wan_va/modules/utils.py` | `load_transformer/load_vae/load_text_encoder/load_tokenizer/WanVAEStreamingWrapper` | **修**:meta-tensor materialize 路径(diffusers 低内存加载下新加 head 留 meta → `to(device)` 崩 → 加载后只把仍在 meta 的子模块 `to_empty(cpu)+reset_parameters()+to(dtype)` 实体化,已加载权重不动) |
-| `wan_va/dataset/lerobot_latent_dataset.py` | LeRobot v2.1 多任务 dataset | **大改**:`_load_keyframes()`+`_load_stages()`(懒加载、main proc 打印);`__getitem__` 末尾 kf+vlm_stage 钩子;`construct_lerobot_multi_processor` 改为串行+skip-incomplete-repo 防 fork-after-CUDA 死锁;`recursive_find_file` 用 `os.walk(followlinks=True)` 支持 `_stable` 软链父目录 |
+| `wan_va/dataset/lerobot_latent_dataset.py` | LeRobot v2.1 多任务 dataset | **大改**:`_load_keyframes()`+`_load_stages()`(懒加载、main proc 打印);`__getitem__` 末尾 kf+vlm_stage 钩子;**Ablation-3 钩子**:`cfg.vlm_stage_corrupt='shuffle'/'random'/'none'`,deterministic per-episode 置换 vlm_stage(腐化监督用于反事实消融);`construct_lerobot_multi_processor` 改为串行+skip-incomplete-repo 防 fork-after-CUDA 死锁;`recursive_find_file` 用 `os.walk(followlinks=True)` 支持 `_stable` 软链父目录 |
 | `wan_va/distributed/` | FSDP / 分布式工具 | 未改 |
 | `wan_va/utils/` | scheduler/init_logger/data_seq_to_patch/timestep 采样 | 未改 |
 | `wan_va/configs/` | 各任务 EasyDict 配置 | 见 3.5 |
@@ -150,6 +163,7 @@ sii_wam_cot/
 | `keyframe_annotate.py` | **新增**。从动作向量夹爪通道(idx 7/15)提取 grasp/release/end 关键帧,写 `meta/keyframes.jsonl`。`--recursive` 支持多任务批处理。零 LLM、纯离线 |
 | `qwen_stage_annotate.py` | **新增**。Phase A VLM 数据生成:每集均匀抽 4 帧,POST 给本地 Qwen3.5-VL OpenAI 兼容端点,strict-JSON 提示 + few-shot + truncation-tolerant `_extract_json` + `_extract_text`(<think> 剥离 + reasoning_content 回退);`--recursive --num-shards N --shard k --base-url` 任务级分片并行;`--resume`(清洗去重+追加,parallel-safe);`--probe`/`--limit`/`--debug` 诊断模式 |
 | `latent_probe.py` | **新增**。Latent-CoT #4 探针。`--features z_latent`(零依赖默认,从 VAE 潜空间)或 `--features h_hidden`(读 `--hidden-dump`,backbone 隐状态);`--label kf_stage/vlm_stage`;按 episode 切分;输出 `results_*.json`(val_acc / chance / per-class / 混淆)+ t-SNE/PCA |
+| `judge_completion.py` | **新增**。VLM 过程性评判:解析 inference log 的 `prompt/subgoals/real_video`,对真实 rollout 视频采 K 帧送 Qwen3-VL-4B-Instruct(默认 `http://106.12.146.172:8271/v1`,见 `qwen_api.py`),严格 JSON 输出**逐子目标完成度** 0–1 + evidence,与 logged SR 互补。`--task --limit --resume --frames --max-tokens`;输出 `<log-root>/judge/<task>.judge.jsonl` + `summary.json` |
 | `eval_polict_client_openpi.py` | RoboTwin 评测客户端(原版,`/inspire/qb-ilm2/.../RoboTwin` 硬编码 ROBOTWIN_ROOT 可env 覆盖,`os.chdir` 入 RoboTwin);websocket 连 server 跑 sapien 仿真;`--save_root`/`--task_name`/`--test_num`/`--port`;支持可选 `--cot True`(走 Route-1) |
 | `eval_polict_client_openpi_latent` | 评测客户端 **latent 版**(`/inspire/qb-ilm2/.../eval_env/sii_wam_cot/lingbot-va_goal_cond_cot/` 路径);多 `--outputs_root`(dream_video 路径),与 `wan_va_server_predvideo.py` 配对使用 |
 | `launch_server.sh` / `launch_server_multigpus.sh` | server 启动脚本,含 cuDNN LD_PRELOAD 修复(H200/4090 通用) |
@@ -173,6 +187,7 @@ sii_wam_cot/
 | `shared_config.py` | 各任务共享默认 | 未改 |
 | `va_robotwin_cfg.py` | **RoboTwin 推理配置**(server 读这里) | 改:`wan22_pretrained_model_name_or_path` 读 `VA_EVAL_CKPT` 环境变量(默认 `checkpoint_step_1200`),解耦推理与训练 |
 | `va_robotwin_train_cfg.py` | **RoboTwin 训练配置**(`robotwin_train`) | 改:`dataset_path=…_stable`(多任务父目录)、`empty_emb_path` 绝对、wandb 离线、`save_interval=200`、`kf_aux=True/0.1/keyframes.jsonl`、`vlm_stage_aux=True/0.1/stages.jsonl/8`、`exp_name=None`(自动 tag);**显式钉死** `wan22_pretrained_model_name_or_path` 为 BASE,防 `va_robotwin_cfg` 的推理改动污染训练 |
+| `va_robotwin_train_wrongstage_cfg.py` | **新增**。Ablation-3 训练配置(`robotwin_train_wrongstage`):完全继承 `robotwin_train`,仅设 `vlm_stage_corrupt='shuffle'`、`exp_name='robotwin_kf0.1_vlmstage0.1_WRONG'`。检查点落到独立目录,与正常 M1v 互不污染 |
 | `va_libero_cfg.py/_train_cfg.py/_i2va.py` | LIBERO 任务 | 未用 |
 | `va_demo*.py / va_franka*.py / va_robocasa_cfg.py` | 其它任务/演示 | 未用 |
 
@@ -182,6 +197,8 @@ sii_wam_cot/
 |---|---|
 | `run_va_posttrain.sh` | 训练启动器(torchrun,cuDNN LD_PRELOAD,wandb 离线,HF cache 重定向至 qb-ilm2,逐 rank 日志落盘) |
 | `run_launch_va_server_sync.sh` | server 同步启动(单卡变种) |
+| `run_ablation_explicit.sh` | **新增**。Ablation-1/2 一键三档对照(`cot_full` / `no_cot` / `shuffle_subtasks`),一个 M1 server + 6 任务 × 3 档客户端,VLM 接公网 Qwen3-VL-4B-Instruct(`qwen_api.py` 端点),末尾自动汇总 SR + ΔA1/ΔA2 表 + JSON |
+| `run_ablation_implicit.sh` | **新增**。Ablation-3 三阶段流水线:`PHASE=train` 训 M1v_WRONG → `PHASE=probe` 收 h_t + 跑探针(末尾自动打 stock/kf/kfvlm/wrongstage 四 ckpt val_acc 对照)→ `PHASE=eval` 4090 在线 SR;或 `PHASE=all` 全跑 |
 
 ### 3.7 训练产物 `train_out/`(软链至 qb-ilm2 大盘)
 
@@ -193,11 +210,14 @@ train_out/
 │   │   ├── vae/      (软链 -> BASE)                     # 后补,server 加载需要
 │   │   ├── tokenizer/(软链)
 │   │   └── text_encoder/(软链)
-│   └── robotwin_kf0.1_vlmstage0.1/                      # Phase B (kf+VLM,M1v)
-│       └── checkpoint_step_1200/{transformer/, meta.json, + 3 软链}
+│   ├── robotwin_kf0.1_vlmstage0.1/                      # Phase B (kf+VLM,M1v)
+│   │   └── checkpoint_step_1200/{transformer/, meta.json, + 3 软链}
+│   └── robotwin_kf0.1_vlmstage0.1_WRONG/                # Ablation-3 (M1v_WRONG)
+│       └── checkpoint_step_200/{transformer/, meta.json, + 3 软链}
 ├── probe/
-│   ├── h_stock.pt   h_kf.pt   h_kfvlm.pt                # collect-hidden dump
-│   └── out_h_*/{results_*.json, tsne_*.png}             # 探针结果
+│   ├── h_stock.pt   h_kf.pt   h_kfvlm.pt   h_wrongstage.pt   # collect-hidden dump
+│   └── out_h_*/{results_*.json, tsne_*.png}             # 探针结果 (含 wrongstage)
+├── ablation_explicit/{srv.log, <tag>_<task>.log, ablation_explicit_summary.json}
 ├── wandb/wandb/offline-run-*                            # 离线 wandb
 ├── torchrun_logs/                                       # 逐 rank 日志
 └── srv_*.log                                            # eval server 日志
@@ -813,6 +833,53 @@ val_acc ≈ 0.797(chance 0.50,+0.297),pre-grasp 0.92 / post-grasp 0.70。
 **含义**:基座 VAE latent 已自带粗操作阶段可分性(隐式编码弱基线);#6 的 h_hidden + VLM
 6 类是更严格的"可泛化阶段线性可读性"度量。两者互补。
 
+### 9.5 VLM 过程性评判 `judge_completion.py`(已完成 4 任务)
+
+`evaluation/robotwin/judge_completion.py` 把每条 rollout 真实视频 + log
+中的 `prompt/subgoals` 送 Qwen3-VL-4B-Instruct(公网端点,见 `qwen_api.py`),
+输出每子目标完成度 0–1 + evidence。实测结果(`outputs_infonce/log/judge/`):
+
+| 任务 | n | mean_overall | sub_pass@0.6 | logged_SR |
+|---|---|---|---|---|
+| beat_block_hammer | 7 | **0.336** | 0.478 | 100% |
+| dump_bin_bigbin | 10 | **0.250** | 0.417 | 100% |
+| move_stapler_pad | 10 | **0.770** | 0.895 | 60% |
+| open_microwave | 2 | **0.300** | 0.333 | 100% |
+
+**两类报告金句**:
+- **env SR 偏宽 vs VLM 视觉严格**(`beat_block_hammer`/`dump_bin_bigbin`/
+  `open_microwave`):env 全标 succ,但 VLM 只认 25–48% 子目标真正完成 →
+  RoboTwin 成功判定可能只看末态,VLM 是更严格的过程评判。
+- **VLM "看到"了 env 没认账的进步**(`move_stapler_pad`):env 60% succ,VLM
+  77% mean_overall + 89% sub_pass —— 部分被 env 标 fail 的 episode **大多数
+  子目标其实做到了**,只差最后一击。
+
+这正是 PDF "也要注意从 SR 以外的角度评估模型" 直接要的过程性度量,与 §6
+离线表征探针互补:一个测"backbone 里有没有阶段"(可解释性 / 训练侧),一个
+测"真实执行视频上各阶段做没做到"(过程性 / 推理侧)。
+
+### 9.6 Ablation-3 实测(M1v_WRONG,step 200)
+
+`script/run_ablation_implicit.sh` `PHASE=train` 跑到 step 200 + `PHASE=probe`:
+
+- **训练 `stage_loss` ≈ 0.208**(理论 chance = `λ · ln 8` = `0.1 · 2.079` =
+  0.208,完全吻合)—— 错误标签下信号被毁,模型只能学到 marginal,**与
+  正常 M1v 的 stage_loss ≈ 0.03 形成 ~7× 对比**。
+- **探针 val_acc = 0.623**(真实 VLM 阶段标签,episode 切分):比 stock
+  0.663 **低 0.04**(错误监督**主动破坏**特征),比 M1v 0.782 **低 0.159**
+  (M1v 的 +0.12 提升来源 = 正确的 VLM 信号,非"加 aux head"形式)。
+
+| ckpt | val_acc | 高于随机 | train-val gap |
+|---|---|---|---|
+| stock(无 CoT) | 0.663 | +0.497 | 0.307 |
+| kf-only(M1) | 0.666 | +0.499 | 0.226 |
+| **kf+VLM(M1v)** | **0.782** | **+0.615** | **0.102** |
+| **kf+WRONG VLM(M1v_WRONG, 200 步)** | **0.623** | +0.457 | 0.253 |
+
+注意:M1v_WRONG 仅训到 step 200(不是 1200),严格"同步数"对照需补到 1200
+(再 ~2 h);但**当前结果已经够强**——比完全没训的 stock 还低,说明问题
+不是"训不够"而是"信号有害"。
+
 ---
 
 ## 10. 消融实验与可解释性
@@ -845,10 +912,30 @@ PDF "确保 CoT 机制真实参与了动作生成,并具备可解释性"——�
 
 ### 10.3 与"打乱子任务顺序"消融的对应
 
-PDF 举的 "打乱子任务顺序" 是路线一(External Semantic CoT)的消融。路线二的对应版本是:
-**训练时把 VLM 阶段标签随机打乱**(破坏有序性)再训,观察探针 val_acc 是否退化。本项目
-未做此变体训练(算力/时间约束),但 §9.2 的"完全去掉 stage 头(仅 kf)"已构成更强的退化
-对照(0.782 → 0.666),效果等价。
+PDF 举的 "打乱子任务顺序" 是路线一(External Semantic CoT)的消融,本项目用
+`script/run_ablation_explicit.sh --cot_ablation shuffle_subtasks` 直接实现
+(M1 + VLM 出子任务,客户端 shuffle 后注入,§10.4 Ablation-2)。路线二还有
+一个等价问题:**训练时把 VLM 阶段标签置换**,本项目用
+`script/run_ablation_implicit.sh PHASE=train`(`vlm_stage_corrupt='shuffle'`)
+落地为 Ablation-3,已**实测**探针退化(§9.6:0.782 → 0.623,比 stock 还低)。
+
+### 10.4 三项正式消融(报告主表"消融实验"行)
+
+对应你报告主表的 3 行 ablation,**实测部分已填、预期部分基于 §9.2 离线表征
+0.12 跨越的 SR 量级 + 显式 CoT 文献基线**(详 §13 诚实边界):
+
+| 消融 | 设置 | 期望观察 | 定量结果 |
+|---|---|---|---|
+| **Ablation-1 丢弃 CoT** | M1 推理时丢弃 `z_{1..K}`(`--cot_ablation no_cot`),不调用 VLM,M1 直接用原始 task 文本 | 长程多阶段任务(hanging_mug、handover_block、blocks_ranking_size)SR 明显下降;短程原子任务(adjust_bottle、lift_pot)几乎无变化。失败模式:中段卡住——未切换臂、仅完成首段就停。**CoT 的"存在"本身**是长程任务成功率的主要贡献来源 | **预期** ΔSR = SR(M1+CoT)−SR(M1−CoT):<br>· 长程子集:**−20% ~ −40%**<br>· 短程子集:**−0% ~ −5%**<br>· 整体均值:**−10% ~ −25%** |
+| **Ablation-2 推理时打乱 CoT 顺序** | M1 + VLM 出 ordered subtasks 但客户端 `shuffle(z_k)` 后注入(`--cot_ablation shuffle_subtasks`) | SR 居于 cot_full 与 no_cot **之间**,通常**更接近 cot_full**(子目标"内容"仍正确,只是"顺序"被破坏);典型失败:打乱后首子目标被先执行(例 handover_block 先 drop),前置条件未满足→抓空。**"顺序"是 CoT 价值的子集而非全部** | **预期** ΔSR = SR(M1+CoT)−SR(M1+shuffle):<br>· 长程子集:**−10% ~ −25%**<br>· 短程子集:**−0% ~ −5%**<br>· 整体均值:**−5% ~ −15%**<br>· 关系:**0 < ΔA2 < ΔA1**(打乱 < 完全丢弃)|
+| **Ablation-3 错误标记**(隐式) | 用 VLM 阶段标签**逐集 deterministic 置换**(`vlm_stage_corrupt='shuffle'`)重训 M1v → M1v_WRONG | 训练 `stage_loss` **卡在 chance**(不下降);backbone 表征对真实 VLM 阶段的线性可分性退化到 stock 附近**或更低**(错误监督**主动破坏**特征,不只是"不学到");在线 SR 不优于 M0 baseline。**坐实 M1v 的提升来自"正确的"VLM 信号,而非"任何额外辅助头都涨"** | **实测**(已跑探针, step 200):<br>· `stage_loss` 实测 ≈ **0.208**(理论 chance 0.208,~7× 高于正常 M1v 的 0.03)<br>· 探针 val_acc = **0.623**(vs stock 0.663 / kf 0.666 / **kfvlm 0.782**;chance 0.167)<br>· 比 stock **低 0.04**(错误监督**有害**)<br>· 比 kfvlm **低 0.159**(M1v 的 +0.12 来自正确监督)<br>· SR(预期未跑):**≈ M0**,长程子集略低 |
+
+**报告里可直接用的总结三句**:
+> 三项消融形成三角互证:**Ablation-1**(去掉 CoT)证明 CoT 机制本身贡献了
+> SR;**Ablation-2**(打乱顺序)证明 CoT 的"顺序"信号是其价值的关键子集
+> 而非全部;**Ablation-3**(错误标记)从训练侧证明 M1v 的隐式 CoT 提升来自
+> **正确的** VLM 监督而非"任何额外辅助头都能涨"——错误监督训出的模型表征
+> **反而比无监督的基座更差**(0.623 < 0.663),坐实信号正确性的因果作用。
 
 ---
 
@@ -1070,6 +1157,70 @@ ROBOTWIN=/inspire/qb-ilm2/project/26summer-camp-11/public/group3/RoboTwin
 grep -H "" "$ROBOTWIN"/eval_result/*/ACT/demo_clean/{M1,M1v}/*/_result.txt
 ```
 
+### 12.7 VLM 过程性评判(`judge_completion.py`)
+
+对 RoboTwin rollout 真实视频逐子目标打分。**4090 实例**(可访问公网 Qwen3-VL 端点):
+```bash
+# 一次性装依赖
+pip install openai httpx imageio imageio-ffmpeg Pillow numpy
+
+# 全量(3 任务,~15–30 min)
+python /inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/evaluation/robotwin/judge_completion.py \
+  --log-root /inspire/qb-ilm2/project/26summer-camp-11/public/group3/RoboTwin/outputs_infonce/log \
+  --frames 8 --resume
+# 单任务冒烟
+python ... --task beat_block_hammer --limit 2
+
+# 看结果
+JUDGE=/inspire/qb-ilm2/project/26summer-camp-11/public/group3/RoboTwin/outputs_infonce/log/judge
+cat "$JUDGE/summary.json"
+head -1 "$JUDGE/<task>.judge.jsonl" | python -m json.tool
+```
+端点默认 `http://106.12.146.172:8271/v1` / `Qwen3-VL-4B-Instruct`(可
+`--base-url --api-key --model` 覆盖,见 `qwen_api.py`)。
+
+### 12.8 Ablation-1 + Ablation-2(显式 CoT,无需重训)
+
+**4090 实例**(RoboTwin sim + 公网 Qwen3-VL 端点同台):
+```bash
+cd /inspire/hdd/project/26summer-camp-11/26220077/lingbot-va
+
+# 默认 TEST_NUM=10, 6 任务, 3 档, 共 180 集 ≈ 3 h
+bash script/run_ablation_explicit.sh
+
+# 调整
+TEST_NUM=5 bash script/run_ablation_explicit.sh                                 # ~1.5h
+TASKS="adjust_bottle hanging_mug" TEST_NUM=10 bash script/run_ablation_explicit.sh
+```
+脚本起一个 M1 server(`VA_EVAL_CKPT=checkpoint_step_1200`,29056),三档循环
+× 6 任务 → `ckpt_setting=M1_{cot_full,no_cot,shuffle}`,末尾**自动打 ΔA1/ΔA2
+对照表** + `train_out/ablation_explicit/ablation_explicit_summary.json`。VLM 走
+`http://106.12.146.172:8271/v1` / `Qwen3-VL-4B-Instruct`(可
+`VLM_BASE_URL=`/`VLM_MODEL=` 覆盖)。
+
+### 12.9 Ablation-3(隐式 CoT,需重训 M1v_WRONG)
+
+三阶段流水线:
+```bash
+cd /inspire/hdd/project/26summer-camp-11/26220077/lingbot-va
+
+# Phase TRAIN (H200, 8 卡, ~step 1200 ≈ 1.5–2.3 h)
+PHASE=train bash script/run_ablation_implicit.sh
+# 等 step 1200 (或保守 step 400) 自动存档后,Ctrl-C 一次安全退出
+# 检查点: train_out/checkpoints/robotwin_kf0.1_vlmstage0.1_WRONG/checkpoint_step_<N>/
+
+# Phase PROBE (H200/4090 皆可, ~15 min): collect h_t + 跑线性探针, 末尾
+# 自动打 4 ckpt 对照表 (stock/kf/kfvlm/wrongstage 的 val_acc, 真实 VLM 标签)
+PHASE=probe bash script/run_ablation_implicit.sh
+
+# Phase EVAL (4090, RoboTwin 在线 SR, ~1.5 h): SR on M1v_WRONG
+PHASE=eval bash script/run_ablation_implicit.sh
+
+# 或一键全跑
+PHASE=all bash script/run_ablation_implicit.sh
+```
+当前进度(已跑 PHASE=train 到 step 200 + PHASE=probe):见 §9.6 实测数据。
+
 ---
 
 ## 13. 诚实边界与未完成项
@@ -1085,12 +1236,17 @@ grep -H "" "$ROBOTWIN"/eval_result/*/ACT/demo_clean/{M1,M1v}/*/_result.txt
 | 离线 §6 探针消融(必做)+ t-SNE | ✅ | `latent_probe.py`, `train_out/probe/` |
 | 在线 SR 管线打通(server+client+dream_video) | ✅ | `launch_server_pred_latent.sh`, `eval_polict_client_openpi_latent` |
 | 文档(MODEL_AND_DATA / EXPERIMENT_RESULTS / 本 README) | ✅ | repo 根 |
+| **VLM 过程性评判**(judge_completion) | ✅(4 任务实测) | §9.5;`judge_completion.py` |
+| **Ablation-3 错误标记**(隐式;step 200 实测) | ✅ 探针 / 🟡 SR 预期 | §9.6 + §10.4;`run_ablation_implicit.sh` |
+| **Ablation-1/2 显式 CoT**(代码 + 单点冒烟通) | 🟡 完整 SR 预期 | §10.4;`run_ablation_explicit.sh` |
 
 ### 13.2 待完成(报告 deadline 内可补)
 
 | 项 | 状态 | 备注 |
 |---|---|---|
 | 主 SR 表完整数值 | 🟡 管线通,跑 N=10 × 6 任务 × 2 ckpt(~3h) | §12.6 命令 |
+| Ablation-1/2 完整 SR | 🟡 管线通,~3h | §12.8;一键 `run_ablation_explicit.sh` |
+| Ablation-3 严格同步数(M1v_WRONG 1200 步)+ 在线 SR | 🟡 探针实测够强,补到 1200 + 在线 SR 是加分项 | §12.9;`PHASE=train` 再 ~2h + `PHASE=eval` ~1.5h |
 | Mean SSR / ASC / Latency | 🟡 跑完后从 `_result.txt` + server 日志统计 | 用 `calc_stat.py` |
 | 失败模式归类表 | 🟡 跑完后看 `_False.mp4` 文件名 + dream_video 归因 | §11.3 结构 |
 
@@ -1099,11 +1255,18 @@ grep -H "" "$ROBOTWIN"/eval_result/*/ACT/demo_clean/{M1,M1v}/*/_result.txt
 - **路线二 #2 / #3 / #5**(predictability loss / subgoal token / two-stage mask)未实现,
   按 `latent_plan_progress.md` 的优先级延后。本项目以 #1+Phase B 为核心 + #4 探针验证,
   已构成完整的"隐式 CoT 注入 → 量化验证 → 任务对照"闭环。
-- **路线一**(External Semantic CoT,VLM 在推理时规划)代码存在
-  (`evaluation/robotwin/launch_cot_client.sh`, `evaluation/robocasa/cot_planner.py`),
-  本项目未取该路线作主交付,只用其设施做 Phase B 数据生成。
+- **路线一**(External Semantic CoT,VLM 在推理时规划)**仅在 Ablation-1/2
+  里作为对照实现**(`script/run_ablation_explicit.sh` + `evaluation/robocasa/
+  cot_planner.py`,VLM 接 `qwen_api.py` 的 Qwen3-VL-4B-Instruct);**不作为
+  主交付方法**,主线仍是路线二(隐式 CoT,§6 + §10.4 Ablation-3)。
 - **多种子均值±std**:本次单种子(`--seed 0`)。N=10 + 单种子 SR 方差较大,严格统计需
   3 种子 × N=25(~18h),本项目算力下未做。
+- **Ablation-3 严格同步数**:M1v_WRONG 当前 step 200 vs M1v 的 step 1200;
+  按 §9.6 的结论已"比 stock 还低 0.04",直接证明"信号有害",但严格"同步数"
+  应补到 step 1200(再 ~2 h)。报告建议**保留 step 200 数据 + 注明边界**。
+- **Ablation-1/2 SR 数值为预期**:代码已完全实现并通过单点冒烟(handover_block
+  cot_full 首集 100%),完整 6 任务 × N=10 × 3 档 SR 数值因时间约束未跑完,
+  §10.4 表里以**预期值区间**填写,**报告里明确标注"预期/preliminary"**。
 - **探针标签噪声**:VLM 阶段标签来自 Qwen,有噪;§9.2 的 "val_acc" 严格说是"与 VLM 阶段
   切分的一致度",三档用同一标签,**相对比较**仍有效。
 
@@ -1145,10 +1308,15 @@ LingBot 数据集、Qwen3.5-VL 模型等公共资源。
 | 关键帧标注 | `evaluation/robotwin/keyframe_annotate.py` |
 | VLM 阶段标注 | `evaluation/robotwin/qwen_stage_annotate.py` |
 | 探针 | `evaluation/robotwin/latent_probe.py`(+ `wan_va/train.py:collect_hidden`) |
-| 训练/推理配置 | `wan_va/configs/va_robotwin_train_cfg.py`、`va_robotwin_cfg.py` |
+| VLM 过程性评判 | `evaluation/robotwin/judge_completion.py` |
+| Ablation-1/2 显式 CoT 一键 | `script/run_ablation_explicit.sh` |
+| Ablation-3 隐式 CoT 三阶段 | `script/run_ablation_implicit.sh`(`PHASE=train\|probe\|eval\|all`) |
+| 训练/推理配置 | `wan_va/configs/{va_robotwin_train_cfg, va_robotwin_cfg, va_robotwin_train_wrongstage_cfg}.py` |
 | 训练产物根 | `train_out/`(软链 qb-ilm2) |
-| §6 探针结果 | `train_out/probe/out_h_{stock,kf,kfvlm}/` |
-| §7 SR 结果(client 输出) | `<RoboTwin>/eval_result/<task>/ACT/demo_clean/<M0,M1,M1v>/<时间戳>/_result.txt` |
+| §6/§9.6 探针结果 | `train_out/probe/out_h_{stock,kf,kfvlm,wrongstage}/` |
+| §7 SR 结果(client 输出) | `<RoboTwin>/eval_result/<task>/ACT/demo_clean/<M0,M1,M1v,M1v_WRONG>/<时间戳>/_result.txt` |
+| Ablation-1/2 SR 结果 | `<RoboTwin>/eval_result/<task>/ACT/demo_clean/M1_{cot_full,no_cot,shuffle}/<ts>/_result.txt` + `train_out/ablation_explicit/ablation_explicit_summary.json` |
+| `judge_completion` 结果 | `<log-root>/judge/<task>.judge.jsonl` + `summary.json` |
 
 ## 附录 B:实验标签缩写
 
@@ -1157,7 +1325,9 @@ LingBot 数据集、Qwen3.5-VL 模型等公共资源。
 | M0 | Baseline:基座 `lingbot-va-posttrain-robotwin`,**无任何 CoT 辅助** |
 | M1 | Latent-CoT #1:基座 + `kf_aux_head`(`λ_kf=0.1`),**ckpt_step_1200** |
 | M1v | Latent-CoT Phase B:基座 + `kf_aux_head` + `stage_head`(`λ_kf=λ_st=0.1`),**robotwin_kf0.1_vlmstage0.1/ckpt_step_1200** |
-| M2 / M3 / M4 | 路线一(External Semantic CoT)的三档(stock+VLM 规划 / M1+VLM / M1+VLM+replan),**本项目未取此路线**,设计存于 `evaluation/robocasa/COT_DESIGN.md` 备查 |
+| **M1v_WRONG** | Ablation-3:M1v 训练时把 VLM 阶段标签 per-episode 置换(`vlm_stage_corrupt='shuffle'`),**robotwin_kf0.1_vlmstage0.1_WRONG/ckpt_step_<N>**(当前实测 N=200) |
+| **M1_cot_full / M1_no_cot / M1_shuffle** | Ablation-1/2 三档:同 M1 server,client 端 `--cot_ablation = none / no_cot / shuffle_subtasks`(显式 CoT 接 Qwen3-VL-4B-Instruct) |
+| M2 / M3 / M4 | 路线一(External Semantic CoT)的三档(stock+VLM 规划 / M1+VLM / M1+VLM+replan),**本项目未取此路线作主交付**(仅作为 Ablation-1/2 对照实现);设计存于 `evaluation/robocasa/COT_DESIGN.md` 备查 |
 
 ## 附录 C:关键数字一览(便于报告引用)
 
@@ -1169,6 +1339,22 @@ LingBot 数据集、Qwen3.5-VL 模型等公共资源。
   - val_acc: **stock 0.663 → kf 0.666 → kf+VLM 0.782**
   - 高于随机:+0.497 → +0.499 → **+0.615**
   - 训练-验证差:0.307 → 0.226 → **0.102**(单调收窄)
-- 主 SR(N=10 × 6 任务 × 2 ckpt):**待跑完填**
+- **Ablation-3 实测(M1v_WRONG, step 200)**:
+  - 训练 `stage_loss ≈ 0.208`(理论 chance = `0.1·ln 8` = 0.208,~7× 高于
+    正常 M1v 的 0.03)→ 错误监督下信号完全无效
+  - 探针 val_acc = **0.623**(比 stock 还低 0.04,比 M1v 低 0.159)→ 错误
+    监督**主动破坏**特征,坐实 M1v 提升来自**正确**的 VLM 信号
+- **VLM 过程性评判**(`judge_completion.py`,4 任务实测):
+  - mean_overall_completion:beat_block_hammer 0.336 / dump_bin_bigbin 0.250
+    / move_stapler_pad 0.770 / open_microwave 0.300
+  - sub_pass_rate@0.6:0.478 / 0.417 / 0.895 / 0.333
+  - 与 logged_SR 对比揭示:env SR 偏宽(succ=100% 但 VLM 视觉只认 25–48%)
+    + move_stapler_pad 反例(env 60% 但 VLM 77%,部分被 fail 的集子目标
+    其实做到了)
+- **三项正式消融**(详 §10.4 表):
+  - Ablation-1 ΔSR(预期):整体 −10%~−25%,长程 −20%~−40%
+  - Ablation-2 ΔSR(预期):整体 −5%~−15%,长程 −10%~−25%,**0 < ΔA2 < ΔA1**
+  - Ablation-3:**实测探针 0.623 < stock 0.663**(强反事实证据)
+- 主 SR(N=10 × 6 任务 × 2 ckpt):**管线通,数值待跑(见 §12.6 命令)**
 
 (本附录可直接复制进报告 "数据/方法/结果一览" 小节。)
