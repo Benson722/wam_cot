@@ -15,7 +15,9 @@
 #   TEST_NUM=20 bash script/run_ablation_explicit.sh
 #   TASKS="adjust_bottle hanging_mug" TEST_NUM=5 bash script/run_ablation_explicit.sh
 
-set -e
+# 注意:刻意 *不* 用 set -e(它会和 `wait_port_up; rc=$?` 这种"先调用后检查"
+# 的模式冲突,导致 wait_port_up 返回非 0 时脚本静默退出、连诊断都不打)。
+# 关键失败路径都已用显式 if / || 处理。
 
 # ============ 可调参数 ============
 TEST_NUM=${TEST_NUM:-10}
@@ -53,21 +55,29 @@ wait_port_free () { for i in $(seq 1 60); do port_listen $1 || return 0; sleep 1
 echo "[ablation/explicit] cleaning leftovers"
 pkill -9 -f 'wan_va_server|wan_va_server_predvideo|torch\.distributed\.run|torch/distributed/run|eval_polict_client_openpi' 2>/dev/null || true
 sleep 5
-wait_port_free $START_PORT || { echo "port $START_PORT 仍被占, 手动 pkill"; exit 1; }
-wait_port_free $MASTER_PORT || { echo "port $MASTER_PORT 仍被占, 手动 pkill"; exit 1; }
+if ! wait_port_free $START_PORT; then
+  echo "port $START_PORT 仍被占, 手动 pkill 再重跑"; exit 1
+fi
+if ! wait_port_free $MASTER_PORT; then
+  echo "port $MASTER_PORT 仍被占, 手动 pkill 再重跑"; exit 1
+fi
 
 # ============ 2) 启动 M1 server (三档共享) ============
 echo "[ablation/explicit] starting M1 server (VA_EVAL_CKPT=$CKPT) on :$START_PORT"
+echo "[ablation/explicit] server 日志: $LOG_DIR/srv.log"
+echo "[ablation/explicit] (loading 模型 ~30s, wait_port_up 最长等 10 min)"
 VA_EVAL_CKPT="$CKPT" CUDA_VISIBLE_DEVICES=0 \
 START_PORT=$START_PORT MASTER_PORT=$MASTER_PORT \
   bash evaluation/robotwin/launch_server.sh > "$LOG_DIR/srv.log" 2>&1 &
 SRV=$!
-wait_port_up $START_PORT
-rc=$?
-if [ $rc -ne 0 ]; then
-  echo "server fail (rc=$rc), last 60 lines of $LOG_DIR/srv.log:"
-  tail -n 60 "$LOG_DIR/srv.log"
+if ! wait_port_up $START_PORT; then
+  rc=$?
+  echo "[ablation/explicit] server 起不来 (rc=$rc), 最后 80 行日志:"
+  echo "------------------------------------------------------------"
+  tail -n 80 "$LOG_DIR/srv.log"
+  echo "------------------------------------------------------------"
   kill -9 $SRV 2>/dev/null || true
+  pkill -9 -f 'wan_va_server\.py|torch\.distributed\.run|torch/distributed/run' 2>/dev/null || true
   exit 1
 fi
 echo "[ablation/explicit] server LISTEN :$START_PORT (PID=$SRV)"
