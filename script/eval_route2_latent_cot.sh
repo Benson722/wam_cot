@@ -93,6 +93,50 @@ if [ $? -ne 0 ]; then
 fi
 if [ $err -ne 0 ]; then exit 1; fi
 
+# ============ Auto-detect: latent client/server 是否存在 ============
+# latent 版需要 eval_env 下两个文件(client + server),任缺一个就回退到主仓库的
+# 常规 client + 常规 server(失去 dream_video,但 SR 表正常出)。
+# 想强制 latent 路径(确保 dream_video):DREAM_VIDEO=1 bash ...
+DREAM_VIDEO=${DREAM_VIDEO:-auto}
+LATENT_CLIENT_FILE="$EVAL_ENV/evaluation/robotwin/eval_polict_client_openpi_latent.py"
+LATENT_SERVER_SH="$EVAL_ENV/evaluation/robotwin/launch_server_pred_latent.sh"
+
+if [ "$DREAM_VIDEO" = "1" ]; then
+  USE_LATENT=1
+elif [ "$DREAM_VIDEO" = "0" ]; then
+  USE_LATENT=0
+else
+  # auto: 两个 latent 文件齐全 -> 用 latent,否则回退
+  if [ -f "$LATENT_CLIENT_FILE" ] && [ -f "$LATENT_SERVER_SH" ]; then
+    USE_LATENT=1
+  else
+    USE_LATENT=0
+  fi
+fi
+
+if [ $USE_LATENT -eq 1 ]; then
+  SERVER_CWD="$EVAL_ENV"
+  SERVER_SH="evaluation/robotwin/launch_server_pred_latent.sh"
+  CLIENT_MODULE="evaluation.robotwin.eval_polict_client_openpi_latent"
+  CLIENT_EXTRA_ARGS=(--outputs_root ./outputs_latent_TAG)   # TAG 占位,后面替换
+  SAVE_ROOT_PREFIX="./results_latent_"
+  MODE_DESC="latent (含 dream_video,server=predvideo, client=latent)"
+else
+  SERVER_CWD="$REPO"
+  SERVER_SH="evaluation/robotwin/launch_server.sh"
+  CLIENT_MODULE="evaluation.robotwin.eval_polict_client_openpi"
+  CLIENT_EXTRA_ARGS=()
+  SAVE_ROOT_PREFIX="./results_"
+  MODE_DESC="regular (无 dream_video, 但 SR 完整;主仓库 client+server)"
+  if [ ! -f "$LATENT_CLIENT_FILE" ]; then
+    echo "[eval] note: $LATENT_CLIENT_FILE 不存在 -> 自动回退到 regular 模式"
+  fi
+fi
+echo "[eval] mode = $MODE_DESC"
+echo "[eval] server cwd = $SERVER_CWD"
+echo "[eval] server sh  = $SERVER_SH"
+echo "[eval] client mod = $CLIENT_MODULE"
+
 # ============ 一次性预备工作 ============
 # 1) 把 M1 / M1v 补成"server 可单目录加载"(vae/tokenizer/text_encoder 从 BASE 软链)
 for CK in "$M1_CKPT" "$M1V_CKPT"; do
@@ -145,10 +189,10 @@ run_one () {            # $1=tag  $2=ckpt  $3=start_port  $4=master_port
   if ! wait_port_free $mp; then echo "[eval] port $mp 仍被占"; return 1; fi
   set_ckpt "$ckpt"
 
-  # 启 latent server(返回 dream_video)
-  cd "$EVAL_ENV" || return 1
+  # 启 server(latent 或 regular,见 USE_LATENT)
+  cd "$SERVER_CWD" || return 1
   CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} START_PORT=$sp MASTER_PORT=$mp \
-    bash evaluation/robotwin/launch_server_pred_latent.sh \
+    bash "$SERVER_SH" \
     > "$LOG_DIR/srv_$tag.log" 2>&1 &
   SRV=$!
   echo "[eval] server $tag launched (PID=$SRV), waiting LISTEN :$sp..."
@@ -167,22 +211,27 @@ run_one () {            # $1=tag  $2=ckpt  $3=start_port  $4=master_port
   for t in $TASKS; do
     echo
     echo "--- $tag :: $t (N=$TEST_NUM) ---"
+    extras=()
+    if [ $USE_LATENT -eq 1 ]; then
+      extras+=(--outputs_root "./outputs_latent_$tag")
+    fi
     PYTHONWARNINGS=ignore::UserWarning XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
-    python -m evaluation.robotwin.eval_polict_client_openpi_latent \
+    python -m "$CLIENT_MODULE" \
       --config policy/ACT/deploy_policy.yml --overrides \
       --task_name $t --task_config demo_clean \
       --train_config_name 0 --model_name 0 --ckpt_setting "$tag" --seed 0 \
       --policy_name ACT \
-      --save_root ./results_latent_$tag \
-      --outputs_root ./outputs_latent_$tag \
+      --save_root "${SAVE_ROOT_PREFIX}${tag}" \
+      "${extras[@]}" \
       --video_guidance_scale 5 --action_guidance_scale 1 \
       --test_num $TEST_NUM --port $sp \
       2>&1 | tee "$LOG_DIR/${tag}_${t}.log"
   done
 
-  # 关本档 server
+  # 关本档 server(latent 和 regular 用不同进程名)
   kill -9 $SRV 2>/dev/null
   pkill -9 -f 'wan_va_server_predvideo\.py' 2>/dev/null
+  pkill -9 -f 'wan_va_server\.py' 2>/dev/null
   pkill -9 -f 'torch\.distributed\.run|torch/distributed/run' 2>/dev/null
   wait $SRV 2>/dev/null
   wait_port_free $sp

@@ -16,16 +16,40 @@
 REPO=${REPO:-/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va}
 PROBE_DIR=${PROBE_DIR:-$REPO/train_out/probe}
 SEED=${SEED:-0}
+LINGBOT_VENV=${LINGBOT_VENV:-/inspire/qb-ilm2/project/26summer-camp-11/26220077/lingbot-va/.venv}
 CANON="$PROBE_DIR/probe_canonical.json"
+
+# 激活 venv(latent_probe 需 numpy/sklearn/torch/matplotlib)
+if [ -f "$LINGBOT_VENV/bin/activate" ]; then
+  # shellcheck disable=SC1091
+  source "$LINGBOT_VENV/bin/activate"
+fi
 
 TAGS="h_stock h_kf h_kfvlm h_wrongstage"
 
-# 预检
+# 预检 dump
 for tag in $TAGS; do
   fp=$PROBE_DIR/$tag.pt
   if [ ! -f "$fp" ]; then echo "[freeze] MISSING: $fp"; exit 1; fi
-  fp2=$PROBE_DIR/out_$tag/results_robotwin_train_h_hidden_vlm_stage.json
-  if [ ! -f "$fp2" ]; then echo "[freeze] MISSING: $fp2 (先跑 latent_probe)"; exit 1; fi
+done
+
+# 关键:**用当前代码 + SEED 跑一次 latent_probe**,覆盖旧 out_h_*/results_*.json
+# 这样 freeze 写入的 expected = 之后 reproduce 拿到的同一来源,真正 PASS。
+echo "[freeze] 用 SEED=$SEED 重跑 latent_probe(确保 canonical 与 reproduce 同源)..."
+for tag in $TAGS; do
+  python "$REPO/evaluation/robotwin/latent_probe.py" \
+    --config robotwin_train \
+    --features h_hidden --label vlm_stage \
+    --hidden-dump "$PROBE_DIR/$tag.pt" \
+    --out-dir "$PROBE_DIR/out_$tag" \
+    --seed "$SEED" > /tmp/_freeze_probe_$tag.log 2>&1
+  if [ $? -ne 0 ]; then
+    echo "[freeze] FAIL on $tag:"
+    tail -n 30 /tmp/_freeze_probe_$tag.log
+    exit 1
+  fi
+  va=$(python -c "import json; d=json.load(open('$PROBE_DIR/out_$tag/results_robotwin_train_h_hidden_vlm_stage.json')); print(f\"{d['val_acc']:.3f}\")")
+  echo "  [refresh] $tag: val_acc=$va"
 done
 
 python - <<PY

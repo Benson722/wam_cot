@@ -301,6 +301,14 @@ def main():
           f"(episodes train/val = "
           f"{len(np.unique(g[tr]))}/{len(np.unique(g[va]))})")
 
+    # 让 nn.Linear 的初始化 + 任何 torch 内部随机性受 args.seed 控制 ->
+    # 给定 dump + seed,val_acc 字节级可复现(reproduce_probe.sh PASS 的前提)。
+    import torch as _t_seed
+    _t_seed.manual_seed(int(args.seed))
+    if _t_seed.cuda.is_available():
+        _t_seed.cuda.manual_seed_all(int(args.seed))
+    np.random.seed(int(args.seed))
+
     probe, pr_tr, pr_va, _ = _train_probe(
         X[tr], y[tr], X[va], y[va], S, args.epochs, args.device)
     tr_acc = float((pr_tr == y[tr]).mean())
