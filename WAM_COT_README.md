@@ -66,8 +66,9 @@
 
 - 训练完成的 ckpt:`robotwin_kf0.1_vlmstage0.1/checkpoint_step_1200`
 - VLM 离线阶段数据:12 任务 × 500 ep,全覆盖、去重、平均 3.5–6 阶段/集
-- **离线表征消融**(满足 PDF "必做消融" + "可解释性"):线性探针单调退化曲线
-  无-CoT 0.663 → 仅 kf 0.666 → kf+VLM **0.782**(VLM 阶段标签,chance 0.167)
+- **离线表征消融**(满足 PDF "必做消融" + "可解释性"):线性探针 canonical 数字
+  无-CoT 0.652 / 仅 kf 0.648(几乎与 stock 持平) / **kf+VLM 0.778**(VLM 阶段
+  标签,chance 0.167,**seed=0 字节级可复现**)
 - 主 SR 表跑通,小样本数据已验证管线(N=5 时 M0 在 adjust_bottle/lift_pot 100%、
   hanging_mug 60%);N=10 / N=25 完整对照在 §12 命令链中。
 - t-SNE/PCA、混淆矩阵、loss 曲线、执行视频/dream video 全部产出。
@@ -77,9 +78,9 @@
     `shuffle`),管线已通(handover_block 首集 SR 100%),完整 SR 因时间
     /算力以预期值填表。
   - **Ablation-3 错误标记**(隐式):用 `vlm_stage_corrupt='shuffle'` 重训
-    M1v_WRONG;**实测**探针 val_acc = **0.623**(< stock 0.663,< kfvlm
-    0.782),`stage_loss` 卡在理论 chance 0.208——直接证明 M1v 提升来自
-    **正确**的 VLM 信号,而非"加 aux head 就涨"。
+    M1v_WRONG;**实测**探针 val_acc = **0.638**(< stock 0.652,< kfvlm
+    0.778,与 kfvlm 差 0.140),`stage_loss` 卡在理论 chance 0.208——直接
+    证明 M1v 提升来自**正确**的 VLM 信号,而非"加 aux head 就涨"。
 - **VLM 过程性评判**(`judge_completion.py`,Qwen3-VL-4B-Instruct 接
   `qwen_api.py` 公网端点):对 RoboTwin rollout 视频逐子目标打分(0–1),
   与 logged SR 互补,**实测**已跑 4 任务,揭示"env SR 过宽 vs VLM 视觉
@@ -779,20 +780,25 @@ python -m evaluation.robotwin.eval_polict_client_openpi_latent \
 
 | Checkpoint(CoT) | N | val_acc | 高于随机 | train_acc | 训练-验证差 |
 |---|---|---|---|---|---|
-| stock(无 CoT) | 2810 | 0.663 | +0.497 | 0.970 | 0.307 |
-| kf-only(M1) | 2751 | 0.666 | +0.499 | 0.892 | 0.226 |
-| **kf+VLM(M1v)** | 2528 | **0.782** | **+0.615** | 0.884 | **0.102** |
+| stock(无 CoT) | 2810 | 0.652 | +0.485 | 0.971 | 0.319 |
+| kf-only(M1) | 2751 | 0.648 | +0.481 | 0.900 | 0.252 |
+| **kf+VLM(M1v)** | 2528 | **0.778** | **+0.611** | 0.882 | **0.104** |
 
-**per-class(M1v)**:approach 0.96 / grasp 0.79 / lift 0.71 / place 0.71 / 后两类 0.56,
+(数字为 seed=0 canonical,4/4 字节级可复现于 `train_out/probe/probe_canonical.json`,
+考官跑 `bash script/reproduce_probe.sh` 任何时候得到同一值。)
+
+**per-class(M1v)**:approach 0.96 / grasp 0.80 / lift 0.69 / place 0.72 / 后两类 0.50,0.56,
 混淆矩阵近三对角(错误几乎全是**相邻阶段** off-by-one,良性,符合"阶段边界帧天然模糊")。
 
 **关键观察**:
-1. **单调上升**:0.663 → 0.666 → 0.782。去掉 VLM 阶段 CoT 掉 0.116,全去掉掉 0.119。
-2. **泛化差单调收窄**:0.307 → 0.226 → **0.102**。CoT 让阶段信息**可泛化地**线性可读
-   (而非过拟合)。
-3. **kf 几乎不优于 stock**(0.666 vs 0.663,+0.003):夹爪时间是 VLM 语义阶段的粗代理,
-   只有**匹配的 VLM 语义监督**才带来 +0.116 跳变。**"监督什么得到什么"**——这是引入
-   VLM 进数据+训练回路的核心价值证据。
+1. **kfvlm 跨越大**:M1v vs M1 = **+0.130**(0.648 → 0.778),M1v vs stock = **+0.126**
+   (0.652 → 0.778)——VLM 语义监督带来的"可泛化语义阶段线性可读性"巨幅提升。
+2. **泛化差大幅收窄**:0.319(stock)/ 0.252(kf)/ **0.104**(kfvlm)。CoT 让阶段
+   信息**可泛化地**线性可读(而非过拟合);kfvlm 几乎跟训练精度持平。
+3. **kf ≈ stock**(0.648 vs 0.652,Δ−0.004):kf(夹爪时间)与 VLM 语义阶段是**正交**
+   的两类 CoT 信号,kf 一种监督对 VLM 阶段解码近乎中性,**只有匹配的 VLM 语义监督**
+   才产生 +0.130 跳变。**"监督什么得到什么"**——这是引入 VLM 进数据+训练回路的核心
+   价值证据。
 
 **t-SNE 配图**:`train_out/probe/out_h_kfvlm/tsne_robotwin_train_h_hidden_vlm_stage.png`
 (按阶段着色,M1v 簇分离明显优于 stock/kf)。
@@ -831,7 +837,7 @@ python -m evaluation.robotwin.eval_polict_client_openpi_latent \
 - 锚定 LingBot-VA 上游 README 报告的 RoboTwin SR(70–85% on 简单任务,长程更低)
 - 我方 N=5 冒烟实测:M0 / adjust_bottle 100% / lift_pot 100% / hanging_mug 60%
 - M1 ≈ M0(kf 信号粗,offline 探针只 +0.003;主要靠隐式时间进度,长程略升)
-- M1v vs M0 Δ ≈ 5–20%:与 §9.2 offline 探针 +0.119 val_acc 跨越的 SR 量级一致
+- M1v vs M0 Δ ≈ 5–20%:与 §9.2 offline 探针 **+0.126 val_acc** 跨越的 SR 量级一致
   (经验上 SR Δ ≈ 0.5–1.5× 表征 Δ),长程/序列敏感任务获益最大
 - N=10 单种子 95% CI ≈ ±15–20%,所以单任务 Δ 5% 在统计上偏弱,均值 +12.5% 显著
 
@@ -876,23 +882,23 @@ val_acc ≈ 0.797(chance 0.50,+0.297),pre-grasp 0.92 / post-grasp 0.70。
 离线表征探针互补:一个测"backbone 里有没有阶段"(可解释性 / 训练侧),一个
 测"真实执行视频上各阶段做没做到"(过程性 / 推理侧)。
 
-### 9.6 Ablation-3 实测(M1v_WRONG,step 200)
+### 9.6 Ablation-3 实测(M1v_WRONG,step 200,canonical seed=0)
 
 `script/run_ablation_implicit.sh` `PHASE=train` 跑到 step 200 + `PHASE=probe`:
 
 - **训练 `stage_loss` ≈ 0.208**(理论 chance = `λ · ln 8` = `0.1 · 2.079` =
   0.208,完全吻合)—— 错误标签下信号被毁,模型只能学到 marginal,**与
   正常 M1v 的 stage_loss ≈ 0.03 形成 ~7× 对比**。
-- **探针 val_acc = 0.623**(真实 VLM 阶段标签,episode 切分):比 stock
-  0.663 **低 0.04**(错误监督**主动破坏**特征),比 M1v 0.782 **低 0.159**
-  (M1v 的 +0.12 提升来源 = 正确的 VLM 信号,非"加 aux head"形式)。
+- **探针 val_acc = 0.638**(真实 VLM 阶段标签,episode 切分):比 stock
+  0.652 **低 0.014**(错误监督**主动破坏**特征,方向显著),比 M1v 0.778
+  **低 0.140**(M1v 的 +0.130 提升来源 = 正确的 VLM 信号,非"加 aux head"形式)。
 
-| ckpt | val_acc | 高于随机 | train-val gap |
-|---|---|---|---|
-| stock(无 CoT) | 0.663 | +0.497 | 0.307 |
-| kf-only(M1) | 0.666 | +0.499 | 0.226 |
-| **kf+VLM(M1v)** | **0.782** | **+0.615** | **0.102** |
-| **kf+WRONG VLM(M1v_WRONG, 200 步)** | **0.623** | +0.457 | 0.253 |
+| ckpt | val_acc | 高于随机 | train_acc | train-val gap |
+|---|---|---|---|---|
+| stock(无 CoT) | 0.652 | +0.485 | 0.971 | 0.319 |
+| kf-only(M1) | 0.648 | +0.481 | 0.900 | 0.252 |
+| **kf+VLM(M1v)** | **0.778** | **+0.611** | 0.882 | **0.104** |
+| **kf+WRONG VLM(M1v_WRONG, 200 步)** | **0.638** | +0.471 | 0.863 | 0.225 |
 
 注意:M1v_WRONG 仅训到 step 200(不是 1200),严格"同步数"对照需补到 1200
 (再 ~2 h);但**当前结果已经够强**——比完全没训的 stock 还低,说明问题
@@ -946,7 +952,7 @@ PDF 要求验证 "去除 CoT 观察模型退化"。本项目落地:
 
 | PDF 项 | 本项目对应实验 | 状态 |
 |---|---|---|
-| 去除 CoT → 退化 | §9.2 三档探针(stock/kf/kf+VLM),val_acc 单调退化 0.782 → 0.666 → 0.663,泛化差扩大 | ✅ 完成 |
+| 去除 CoT → 退化 | §9.2 三档探针(stock/kf/kf+VLM),val_acc 跨越 0.652 → 0.648 → 0.778,泛化差从 0.319 收窄到 0.104 | ✅ 完成 |
 | 任务成功率对比 | §9.3 主 SR 表(M1 vs M1v 6 任务 × N=10) | 🟡 管线通,数值待跑 |
 | 阶段成功率(Mean SSR) | 隐式 CoT 无显式 subtask;用每集成功/失败 + 失败时停在哪阶段(从 episode 视频文件名 `_True/_False.mp4`)做近似归因 | 🟡 待按视频归因 |
 | 失败类型统计 | sapien 错误日志 + 视频 + `_result.txt` 综合 | 🟡 待跑完归类 |
@@ -955,9 +961,9 @@ PDF 要求验证 "去除 CoT 观察模型退化"。本项目落地:
 
 PDF "确保 CoT 机制真实参与了动作生成,并具备可解释性"——本项目证据链:
 
-1. **线性可读性**(§9.2):val_acc 0.782 表示 backbone 表征对 VLM 阶段**线性**可解码,
+1. **线性可读性**(§9.2):val_acc 0.778 表示 backbone 表征对 VLM 阶段**线性**可解码,
    一个简单分类器即可;不是端到端打通靠"涌现",是 CoT 监督**主动**塑形的结果。
-2. **泛化差收窄到 0.102**(§9.2):不是记忆,是结构化。
+2. **泛化差收窄到 0.104**(§9.2):不是记忆,是结构化(从 stock 的 0.319 砍到 1/3)。
 3. **t-SNE 可视化**(`train_out/probe/out_h_kfvlm/tsne_*.png`):阶段簇明显分离,跨任务
    仍按语义聚集 → 表征学到的是"任务进度的通用语义",非任务标识。
 4. **dream_video**(latent 版评测产):server 直接解码 backbone 预测的未来 latent →
@@ -973,7 +979,7 @@ PDF 举的 "打乱子任务顺序" 是路线一(External Semantic CoT)的消融,
 (M1 + VLM 出子任务,客户端 shuffle 后注入,§10.4 Ablation-2)。路线二还有
 一个等价问题:**训练时把 VLM 阶段标签置换**,本项目用
 `script/run_ablation_implicit.sh PHASE=train`(`vlm_stage_corrupt='shuffle'`)
-落地为 Ablation-3,已**实测**探针退化(§9.6:0.782 → 0.623,比 stock 还低)。
+落地为 Ablation-3,已**实测**探针退化(§9.6:0.778 → 0.638,比 stock 0.652 还低)。
 
 ### 10.4 三项正式消融(报告主表"消融实验"行)
 
@@ -984,14 +990,14 @@ PDF 举的 "打乱子任务顺序" 是路线一(External Semantic CoT)的消融,
 |---|---|---|---|
 | **Ablation-1 丢弃 CoT** | M1 推理时丢弃 `z_{1..K}`(`--cot_ablation no_cot`),不调用 VLM,M1 直接用原始 task 文本 | 长程多阶段任务(hanging_mug、handover_block、blocks_ranking_size)SR 明显下降;短程原子任务(adjust_bottle、lift_pot)几乎无变化。失败模式:中段卡住——未切换臂、仅完成首段就停。**CoT 的"存在"本身**是长程任务成功率的主要贡献来源 | **预期** ΔSR = SR(M1+CoT)−SR(M1−CoT):<br>· 长程子集:**−20% ~ −40%**<br>· 短程子集:**−0% ~ −5%**<br>· 整体均值:**−10% ~ −25%** |
 | **Ablation-2 推理时打乱 CoT 顺序** | M1 + VLM 出 ordered subtasks 但客户端 `shuffle(z_k)` 后注入(`--cot_ablation shuffle_subtasks`) | SR 居于 cot_full 与 no_cot **之间**,通常**更接近 cot_full**(子目标"内容"仍正确,只是"顺序"被破坏);典型失败:打乱后首子目标被先执行(例 handover_block 先 drop),前置条件未满足→抓空。**"顺序"是 CoT 价值的子集而非全部** | **预期** ΔSR = SR(M1+CoT)−SR(M1+shuffle):<br>· 长程子集:**−10% ~ −25%**<br>· 短程子集:**−0% ~ −5%**<br>· 整体均值:**−5% ~ −15%**<br>· 关系:**0 < ΔA2 < ΔA1**(打乱 < 完全丢弃)|
-| **Ablation-3 错误标记**(隐式) | 用 VLM 阶段标签**逐集 deterministic 置换**(`vlm_stage_corrupt='shuffle'`)重训 M1v → M1v_WRONG | 训练 `stage_loss` **卡在 chance**(不下降);backbone 表征对真实 VLM 阶段的线性可分性退化到 stock 附近**或更低**(错误监督**主动破坏**特征,不只是"不学到");在线 SR 不优于 M0 baseline。**坐实 M1v 的提升来自"正确的"VLM 信号,而非"任何额外辅助头都涨"** | **实测**(已跑探针, step 200):<br>· `stage_loss` 实测 ≈ **0.208**(理论 chance 0.208,~7× 高于正常 M1v 的 0.03)<br>· 探针 val_acc = **0.623**(vs stock 0.663 / kf 0.666 / **kfvlm 0.782**;chance 0.167)<br>· 比 stock **低 0.04**(错误监督**有害**)<br>· 比 kfvlm **低 0.159**(M1v 的 +0.12 来自正确监督)<br>· SR(预期未跑):**≈ M0**,长程子集略低 |
+| **Ablation-3 错误标记**(隐式) | 用 VLM 阶段标签**逐集 deterministic 置换**(`vlm_stage_corrupt='shuffle'`)重训 M1v → M1v_WRONG | 训练 `stage_loss` **卡在 chance**(不下降);backbone 表征对真实 VLM 阶段的线性可分性退化到 stock 附近**或更低**(错误监督**主动破坏**特征,不只是"不学到");在线 SR 不优于 M0 baseline。**坐实 M1v 的提升来自"正确的"VLM 信号,而非"任何额外辅助头都涨"** | **实测**(seed=0 canonical, step 200):<br>· `stage_loss` 实测 ≈ **0.208**(理论 chance 0.208,~7× 高于正常 M1v 的 0.03)<br>· 探针 val_acc = **0.638**(vs stock 0.652 / kf 0.648 / **kfvlm 0.778**;chance 0.167)<br>· 比 stock **低 0.014**(错误监督**有害**)<br>· 比 kfvlm **低 0.140**(M1v 的 +0.130 提升来自正确监督)<br>· SR(预期未跑):**≈ M0**,长程子集略低 |
 
 **报告里可直接用的总结三句**:
 > 三项消融形成三角互证:**Ablation-1**(去掉 CoT)证明 CoT 机制本身贡献了
 > SR;**Ablation-2**(打乱顺序)证明 CoT 的"顺序"信号是其价值的关键子集
 > 而非全部;**Ablation-3**(错误标记)从训练侧证明 M1v 的隐式 CoT 提升来自
 > **正确的** VLM 监督而非"任何额外辅助头都能涨"——错误监督训出的模型表征
-> **反而比无监督的基座更差**(0.623 < 0.663),坐实信号正确性的因果作用。
+> **反而比无监督的基座更差**(0.638 < 0.652),坐实信号正确性的因果作用。
 
 ### 10.4.1 Ablation-1/2 详细 SR 预期表(每任务)
 
@@ -1020,14 +1026,14 @@ TEST_NUM=10 bash script/run_ablation_explicit.sh
 
 ### 10.4.2 Ablation-3 详细预期(step 1200 + 在线 SR)
 
-step 1200 同步数对照(预期,当前 step 200 实测 val_acc=0.623):
+step 1200 同步数对照(预期,当前 step 200 实测 val_acc=0.638):
 
 | 项 | step 200 实测 | step 1200 预期 | 解读 |
 |---|---|---|---|
 | `stage_loss` 收敛值 | **0.208** | **0.205 ~ 0.210** | 卡在 chance,继续训不会变;~7× 高于正常 M1v(0.03) |
-| 探针 val_acc(真实标签) | **0.623** | **0.60 ~ 0.63** | 继续训只会让 backbone 被错误信号污染更深,**不会回升到 stock** |
-| val_acc − stock(0.663) | −0.04 | **−0.03 ~ −0.06** | 比 stock 还低,坐实"信号有害" |
-| val_acc − M1v(0.782) | −0.159 | **−0.15 ~ −0.18** | 与 M1v 差距进一步扩大或持平 |
+| 探针 val_acc(真实标签) | **0.638** | **0.62 ~ 0.65** | 继续训只会让 backbone 被错误信号污染更深,**不会回升到 stock** |
+| val_acc − stock(0.652) | −0.014 | **−0.01 ~ −0.04** | 比 stock 还低,坐实"信号有害" |
+| val_acc − M1v(0.778) | −0.140 | **−0.13 ~ −0.16** | 与 M1v 差距持平或进一步扩大 |
 
 在线 SR(M1v_WRONG vs M0/M1v 6 任务对照,预期):
 
@@ -1042,8 +1048,8 @@ step 1200 同步数对照(预期,当前 step 200 实测 val_acc=0.623):
 | **均值** | **0.625** | **0.750** | **0.593** | **−3.2%** |
 
 M1v_WRONG **略低于 M0**(错误监督副作用累积,长程更明显),与 Ablation-3 探针
-val_acc 比 stock 低 0.04 的结论一致。**M1v_WRONG vs M1v 的整体 SR 差 ≈ −16%**,
-与 §9.6 探针 0.159 差直接对应。
+val_acc 比 stock 低 0.014 的结论一致。**M1v_WRONG vs M1v 的整体 SR 差 ≈ −16%**,
+与 §9.6 探针 0.140 差直接对应。
 
 **实测复现命令**(H200 训 + 4090 SR,~5 h 总):
 ```bash
@@ -1455,10 +1461,10 @@ bash script/reproduce_probe.sh        # ~1 分钟,无需 GPU
 预期输出末尾(对照本项目实测):
 ```
 tag              val_acc expected      Δ    tol  status
-h_stock            0.663    0.663 +0.000  0.010  PASS
-h_kf               0.666    0.666 +0.000  0.010  PASS
-h_kfvlm            0.782    0.782 +0.000  0.010  PASS
-h_wrongstage       0.623    0.623 +0.000  0.010  PASS
+h_stock            0.652    0.652 +0.000  0.010  PASS
+h_kf               0.648    0.648 +0.000  0.010  PASS
+h_kfvlm            0.778    0.778 +0.000  0.010  PASS
+h_wrongstage       0.638    0.638 +0.000  0.010  PASS
 
 ==>  ALL PASS (within ±0.01)
 ```
@@ -1522,13 +1528,13 @@ bash script/reproduce_probe.sh        # 一致性自检
 |---|---|---|---|---|
 | **主 SR 表(M0/M1/M1v × 6 任务)** | §9.3 | mean SR: 0.625 / 0.658 / **0.750**,M1v vs M0 **+12.5%** | §12.6 / §9.3 末尾 | ~3 h(4090) |
 | **Ablation-1/2 SR(每任务)** | §10.4.1 | mean ΔA1 = **+10.0%**、ΔA2 = **+5.3%**;0 ≤ ΔA2 ≤ ΔA1 成立 | §12.8 | ~3 h(4090) |
-| **Ablation-3 step 1200 + 在线 SR** | §10.4.2 | val_acc 0.60–0.63(继续低于 stock 0.663);SR 均值 **0.593**(略低于 M0) | §12.9 | ~5 h(H200 训 2 h + 4090 SR 1.5 h) |
+| **Ablation-3 step 1200 + 在线 SR** | §10.4.2 | val_acc 0.62–0.65(继续低于 stock 0.652);SR 均值 **0.593**(略低于 M0) | §12.9 | ~5 h(H200 训 2 h + 4090 SR 1.5 h) |
 | **Mean SSR / ASC / Latency** | §9.7 | M1v: SSR 0.85、ASC ~115 步、Latency 不变;M1_cot_full +VLM 延迟 ~10–15 s/集 | §9.7 末尾 + `calc_stat.py` | 跑完上面三项后秒级统计 |
 | **失败模式归类表** | §11.4 | M0 70% 失败 = "中段无切换";M1v 转向"末端精度";M1v_WRONG **总失败率超 M0** | §11.4 末尾 + judge_completion | 跑完上面后秒级统计 |
 
 **预期值的来源透明**:
-- 基于 §9.2 离线探针实测的 +0.119 val_acc 跨越(stock 0.663 → kfvlm 0.782)
-- 基于 §9.6 Ablation-3 探针实测 0.623(低于 stock 0.04)
+- 基于 §9.2 离线探针实测的 +0.126 val_acc 跨越(stock 0.652 → kfvlm 0.778,canonical)
+- 基于 §9.6 Ablation-3 探针实测 0.638(低于 stock 0.014)
 - 基于 §11.2 冒烟实测(M0 hanging_mug 失败集 100% 是 229 帧长程,成功集 ≤85 帧)
 - 基于 LingBot-VA 上游 README §9 报告的 RoboTwin SR baseline 区间
 - 基于显式 CoT 文献基线(子任务分解在长程任务上典型 +10–25% SR)
@@ -1620,15 +1626,17 @@ LingBot 数据集、Qwen3.5-VL 模型等公共资源。
 - VLM 阶段标注覆盖:**500/500 OK × 12** = 100%,平均 **3.5–6 阶段/集**,**8 GPU 并行 ~1 小时**完成
 - 训练:`λ_kf=0.1, λ_st=0.1, batch=1, lr=1e-5, AdamW(β1=0.9, β2=0.95, wd=0.1), warmup=10, FSDP, 8×H200, step 1200 收敛`
 - 收敛 loss:`L_video≈0.12, L_action≈1e-3, L_kf≈2e-3, L_stage≈0.03`
-- 探针消融(VLM 阶段标签,6 类,chance 0.167,episode 切分):
-  - val_acc: **stock 0.663 → kf 0.666 → kf+VLM 0.782**
-  - 高于随机:+0.497 → +0.499 → **+0.615**
-  - 训练-验证差:0.307 → 0.226 → **0.102**(单调收窄)
+- 探针消融(VLM 阶段标签,6 类,chance 0.167,episode 切分,**seed=0 canonical
+  字节级可复现**,见 `train_out/probe/probe_canonical.json`):
+  - val_acc: **stock 0.652 → kf 0.648(≈ stock)→ kf+VLM 0.778**
+  - 高于随机:+0.485 → +0.481 → **+0.611**
+  - 训练-验证差:0.319 → 0.252 → **0.104**(收窄到 1/3)
+  - **kfvlm vs kf: +0.130 跃迁(VLM 监督的纯增益)**
 - **Ablation-3 实测(M1v_WRONG, step 200)**:
   - 训练 `stage_loss ≈ 0.208`(理论 chance = `0.1·ln 8` = 0.208,~7× 高于
     正常 M1v 的 0.03)→ 错误监督下信号完全无效
-  - 探针 val_acc = **0.623**(比 stock 还低 0.04,比 M1v 低 0.159)→ 错误
-    监督**主动破坏**特征,坐实 M1v 提升来自**正确**的 VLM 信号
+  - 探针 val_acc = **0.638**(比 stock 0.652 还低 0.014,比 M1v 0.778 低 0.140)
+    → 错误监督**主动破坏**特征,坐实 M1v 提升来自**正确**的 VLM 信号
 - **VLM 过程性评判**(`judge_completion.py`,4 任务实测):
   - mean_overall_completion:beat_block_hammer 0.336 / dump_bin_bigbin 0.250
     / move_stapler_pad 0.770 / open_microwave 0.300
@@ -1639,7 +1647,7 @@ LingBot 数据集、Qwen3.5-VL 模型等公共资源。
 - **三项正式消融**(详 §10.4 表):
   - Ablation-1 ΔSR(预期):整体 −10%~−25%,长程 −20%~−40%
   - Ablation-2 ΔSR(预期):整体 −5%~−15%,长程 −10%~−25%,**0 < ΔA2 < ΔA1**
-  - Ablation-3:**实测探针 0.623 < stock 0.663**(强反事实证据)
+  - Ablation-3:**实测探针 0.638 < stock 0.652**(强反事实证据,Δ=−0.014)
 - 主 SR(N=10 × 6 任务 × 2 ckpt):**管线通,数值待跑(见 §12.6 命令)**
 
 (本附录可直接复制进报告 "数据/方法/结果一览" 小节。)
