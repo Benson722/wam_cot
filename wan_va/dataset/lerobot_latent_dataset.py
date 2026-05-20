@@ -461,6 +461,28 @@ class LatentLeRobotDataset(LeRobotDataset):
                     si = int((starts <= rep).sum()) - 1
                     if si >= 0:
                         vstage[i] = min(si, S - 1)
+            # Ablation-3 (implicit CoT, "wrong stage labels"): corrupt the
+            # VLM supervision so the stage_head signal is meaningless. Used
+            # to retrain M1v with broken labels and confirm the SR / probe
+            # gains came from the correctness of the VLM signal, not from
+            # "any extra auxiliary head".  Deterministic per-episode (seed
+            # = episode_index) so the corruption is stable across epochs.
+            mode = str(getattr(self.config, "vlm_stage_corrupt",
+                               "none")).lower()
+            if mode in ("shuffle", "random") and (vstage >= 0).any():
+                rng = np.random.RandomState(int(episode_index))
+                valid = vstage >= 0
+                if mode == "shuffle":
+                    # per-episode permutation of {0..S-1}: every frame still
+                    # has a label, but the assignment is decorrelated from
+                    # visual content (preserves marginal label distribution)
+                    perm = rng.permutation(S).astype(np.int64)
+                    vstage = np.where(valid, perm[vstage.clip(min=0)],
+                                      -1).astype(np.int64)
+                else:  # "random"
+                    rand = rng.randint(0, S, size=vstage.shape).astype(
+                        np.int64)
+                    vstage = np.where(valid, rand, -1).astype(np.int64)
             out_dict['vlm_stage'] = torch.from_numpy(vstage)
         return out_dict
 
