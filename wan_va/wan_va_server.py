@@ -64,6 +64,22 @@ def _log_param_counts(vae, text_encoder, transformer, ckpt_path=None):
     p_xf_main = p_xf - p_kf - p_st
     p_total = p_vae + p_te + p_xf
 
+    # === byte/flops 格式化 ===
+    def _fmt_bytes(n):
+        for unit in ("B", "KB", "MB", "GB", "TB"):
+            if n < 1024:
+                return f"{n:6.2f} {unit}"
+            n /= 1024
+        return f"{n:6.2f} PB"
+
+    def _fmt_flops(n):
+        for unit in ("FLOPs", "KFLOPs", "MFLOPs", "GFLOPs", "TFLOPs",
+                     "PFLOPs", "EFLOPs"):
+            if n < 1000:
+                return f"{n:7.2f} {unit}"
+            n /= 1000
+        return f"{n:7.2f} ZFLOPs"
+
     lines = [
         "",
         "================  Model Parameter Counts  ================",
@@ -82,6 +98,41 @@ def _log_param_counts(vae, text_encoder, transformer, ckpt_path=None):
         "  (kf_aux_head / stage_head 推理时不调用;仅训练时用作辅助监督)")
     lines.append(
         "==========================================================")
+
+    # === Compute cost: memory + Kaplan FLOPs estimate ===
+    TOKENS_PER_FORWARD = 1500   # Wan2.2 patch+latent 大致每 forward 1k-2k tok
+    CHUNKS_PER_EPISODE = 100    # 平均 episode ~100 chunk
+    lines += [
+        "================  Compute Cost (estimates)  ==============",
+        "  Memory footprint(仅权重,不含 KV cache / activations / 梯度):",
+    ]
+    for dt_name, dt_bytes in (("bf16/fp16 (inference)", 2),
+                              ("fp32      (training) ", 4)):
+        m_v = p_vae * dt_bytes; m_t = p_te * dt_bytes
+        m_x = p_xf  * dt_bytes; m_T = p_total * dt_bytes
+        lines.append(
+            f"    {dt_name}: VAE {_fmt_bytes(m_v)} | UMT5 {_fmt_bytes(m_t)}"
+            f" | Xfmr {_fmt_bytes(m_x)} | TOTAL {_fmt_bytes(m_T)}")
+    f_per_tok_xf  = 6 * p_xf
+    f_per_tok_te  = 6 * p_te
+    f_per_tok_vae = 6 * p_vae
+    lines += [
+        "  Forward FLOPs(Kaplan ≈ 6 × P × N_tokens):",
+        f"    Transformer / token                : "
+        f"{_fmt_flops(f_per_tok_xf)}",
+        f"    Transformer / forward (~{TOKENS_PER_FORWARD:>4d} tok)   : "
+        f"{_fmt_flops(f_per_tok_xf * TOKENS_PER_FORWARD)}",
+        f"    Transformer / episode (~{CHUNKS_PER_EPISODE:>3d} chunk) : "
+        f"{_fmt_flops(f_per_tok_xf * TOKENS_PER_FORWARD * CHUNKS_PER_EPISODE)}",
+        f"    UMT5 encode / prompt (~512 tok, 1×/ep)     : "
+        f"{_fmt_flops(f_per_tok_te * 512)}",
+        f"    VAE encode/decode / pass (~256 tok)        : "
+        f"{_fmt_flops(f_per_tok_vae * 256)}",
+        "  说明:TOKENS_PER_FORWARD/CHUNKS_PER_EPISODE 为粗估;"
+        "training step ≈ 3× forward FLOPs(含 backward);"
+        "实测推理延迟见后续 infer 日志(典型 0.3–0.5 s/chunk on 4090)",
+        "==========================================================",
+    ]
     for ln in lines:
         logger.info(ln)
 

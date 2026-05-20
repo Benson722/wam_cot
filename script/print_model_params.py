@@ -71,6 +71,29 @@ def fmt(n):
     return f"{n / 1e3:6.1f} K"
 
 
+def fmt_bytes(n):
+    """Bytes -> human (KB/MB/GB/TB)."""
+    if n is None:
+        return "    --   "
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024:
+            return f"{n:6.2f} {unit}"
+        n /= 1024
+    return f"{n:6.2f} PB"
+
+
+def fmt_flops(n):
+    """FLOPs -> human (GFLOPs/TFLOPs/PFLOPs)."""
+    if n is None:
+        return "    --   "
+    for unit in ("FLOPs", "KFLOPs", "MFLOPs", "GFLOPs", "TFLOPs",
+                 "PFLOPs", "EFLOPs"):
+        if n < 1000:
+            return f"{n:7.2f} {unit}"
+        n /= 1000
+    return f"{n:7.2f} ZFLOPs"
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Print model parameter counts via safetensors metadata.")
@@ -113,6 +136,48 @@ def main():
           + (f"   [{n_xf} file(s)]" if n_xf else "   [N/A]"))
     print(f"  TOTAL (VAE + UMT5 + Xfmr) : {fmt(p_total)}  ({p_total:>14,d})")
     print( "  (kf_aux_head / stage_head 推理时不调用;仅训练时用作辅助监督)")
+    print("==========================================================")
+
+    # ==================== 计算开销估算 ====================
+    # 1) Memory footprint = params × bytes/param(权重本身,不含 KV cache /
+    #    activations / 梯度)
+    # 2) Forward FLOPs(Kaplan rule fwd_flops ≈ 6 × P × N_tokens)
+    # 3) 推理估算 = per-forward × 一次 rollout 的 forward 次数
+    TOKENS_PER_FORWARD = 1500   # Wan2.2 patch+latent 大致每 forward 1k–2k tok
+    CHUNKS_PER_EPISODE = 100    # 平均 episode ~100 chunk(短任务 ~30,长 ~230)
+    print()
+    print("================  Compute Cost (estimates)  ==============")
+    print("  Memory footprint(仅权重,不含 KV cache / activations / 梯度):")
+    for dt_name, dt_bytes in (("bf16/fp16 (inference)", 2),
+                               ("fp32      (training) ", 4)):
+        m_vae = p_vae * dt_bytes
+        m_te  = p_te  * dt_bytes
+        m_xf  = p_xf  * dt_bytes
+        m_tot = p_total * dt_bytes
+        print(f"    {dt_name}: VAE {fmt_bytes(m_vae)} | UMT5 {fmt_bytes(m_te)}"
+              f" | Xfmr {fmt_bytes(m_xf)} | TOTAL {fmt_bytes(m_tot)}")
+    print()
+    print("  Forward FLOPs(Kaplan ≈ 6 × P × N_tokens):")
+    f_per_tok_xf = 6 * p_xf       # Xfmr per token
+    f_per_tok_te = 6 * p_te       # UMT5 per token
+    f_per_tok_vae = 6 * p_vae     # VAE per token (indicative)
+    print(f"    Transformer / token                : "
+          f"{fmt_flops(f_per_tok_xf)}")
+    print(f"    Transformer / forward (~{TOKENS_PER_FORWARD:>4d} tok)   : "
+          f"{fmt_flops(f_per_tok_xf * TOKENS_PER_FORWARD)}")
+    print(f"    Transformer / episode (~{CHUNKS_PER_EPISODE:>3d} chunk) : "
+          f"{fmt_flops(f_per_tok_xf * TOKENS_PER_FORWARD * CHUNKS_PER_EPISODE)}")
+    print(f"    UMT5 encode / prompt (~512 tok, 1×/episode): "
+          f"{fmt_flops(f_per_tok_te * 512)}")
+    print(f"    VAE encode/decode / pass (~256 tok)        : "
+          f"{fmt_flops(f_per_tok_vae * 256)}")
+    print()
+    print( "  说明:")
+    print(f"    · TOKENS_PER_FORWARD={TOKENS_PER_FORWARD}, "
+          f"CHUNKS_PER_EPISODE={CHUNKS_PER_EPISODE} 为粗估;实际依任务/分块数变")
+    print( "    · 训练 step ≈ 3 × forward FLOPs(含 backward)")
+    print( "    · 实测推理延迟:server 启动后看 \"infer\" 日志"
+          "(典型 0.3–0.5 s/chunk on 4090)")
     print("==========================================================")
 
 

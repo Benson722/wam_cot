@@ -203,7 +203,7 @@ sii_wam_cot/
 | `eval_route2_latent_cot.sh` | **新增**。一键评测两个 Latent-CoT ckpt(M1 + M1v):自动激活 venv、补齐 ckpt 软链、打开 RoboTwin 视频开关、跑 6 任务,末尾出 SR 汇总表。`bash` 直接调用,他人零配置可用 |
 | `launch_server_pred_latent.sh` | **新增**。完全沿用 EVAL_ENV reference 风格的 latent server 启动器,加 `TAG=M1\|M1v` 切 ckpt(sed 改 eval_env 配置 + 自动补 vae/tokenizer/text_encoder 软链 + Ctrl-C 自动复原)。**启动前自动调 `print_model_params.py` 打印模型参数量**(EVAL_ENV server 源码不动)。出 dream_video |
 | `launch_client_latent.sh` | **新增**。配套 latent client 启动器,接受 `TAG=M1\|M1v / TASK=<robotwin 任务> / TEST_NUM=N / PORT=...`,内部 `cd EVAL_ENV` 跑 `eval_polict_client_openpi_latent`,与 launch_server_pred_latent.sh 配对。dream_video 落到 `outputs_latent_<TAG>/` |
-| `print_model_params.py` | **新增**。轻量级模型参数量统计:只读 `*.safetensors` 文件 metadata,**不加载权重 / 不需 GPU,~100ms**。breakdown 到 VAE / UMT5 / Transformer 主干 / kf_aux_head / stage_head 五件。用法:`python script/print_model_params.py --ckpt <ckpt_dir> [--tag M1\|M1v]`,被 `launch_server_pred_latent.sh` 自动 pre-flight 调用 |
+| `print_model_params.py` | **新增**。轻量级"模型参数量 + 计算开销"统计:只读 `*.safetensors` 文件 metadata,**不加载权重 / 不需 GPU,~100ms**。breakdown 到 VAE / UMT5 / Transformer 主干 / kf_aux_head / stage_head 五件 + **memory footprint(bf16/fp32)** + **Kaplan FLOPs**(per token / per forward / per episode)。用法:`python script/print_model_params.py --ckpt <ckpt_dir> [--tag M1\|M1v]`,被 `launch_server_pred_latent.sh` 自动 pre-flight 调用 |
 | `reproduce_probe.sh` | **新增**。考官端 §6/§10.4 探针消融**秒级可复现**(无需 GPU):从 `train_out/probe/h_*.pt` dump 跑 latent_probe,与 `probe_canonical.json` 的 expected val_acc 对照,PASS/FAIL 给定 |
 | `freeze_probe.sh` | **新增**。作者端一次性冻结:把当前 `h_*.pt` 的 sha256 + `results_*.json` 的 val_acc 写入 `probe_canonical.json`,作为复现的标准答案 |
 
@@ -552,32 +552,45 @@ tensor`。修复:加载完后扫所有子模块,**仅对参数仍在 meta 的子
 `reset_parameters()` + `sub.to(dtype)`,已加载权重不动。推理时这两个头**不被调用**(server
 只走 video+action 路径),所以 ckpt 没保存这两头的权重也无妨,会随机初始化但不影响 SR。
 
-### 6.6 推理日志:模型参数量自动打印
+### 6.6 推理日志:模型参数量 + 计算开销自动打印
 
-每次启动 server 都会在日志开头打一份**模型参数规模 breakdown**(VAE / UMT5 /
-Transformer 主干 / kf_aux_head / stage_head 五件),便于报告里直接引用"模型规
-模 / 推理开销"那一格。两个 server 实现路径不同(都不影响:**EVAL_ENV 源码绝对
-不动**):
+每次启动 server 都会在日志开头打一份**模型规模 + 计算开销 breakdown**(两段),
+便于报告里直接引用"模型规模 / 推理开销"那一格。两个 server 实现路径不同(都
+不影响:**EVAL_ENV 源码绝对不动**):
 
 | Server | 怎么打 | 实现位置 |
 |---|---|---|
 | **主仓库** `wan_va/wan_va_server.py`(`launch_server.sh` 等用) | `__init__` 里 `load_transformer` 之后直接遍历 `parameters()` 数,通过 `logger.info` 多行 INFO | 已 inline 在 `wan_va/wan_va_server.py:_log_param_counts` |
 | **EVAL_ENV** `wan_va/wan_va_server_predvideo.py`(`launch_server_pred_latent.sh` 用) | **不动 EVAL_ENV 源码**;在我们 wrapper `script/launch_server_pred_latent.sh` 里**启动 server 之前** pre-flight 调用 `python script/print_model_params.py --ckpt <CKPT> --tag M1\|M1v`,只读 safetensors metadata(**不加载权重 / 不需 GPU,~100ms**)| `script/print_model_params.py` + `script/launch_server_pred_latent.sh` |
 
-两条路径输出格式完全一致,日志大致这样:
+两条路径输出格式完全一致,日志大致这样(具体数字以真跑为准;下面是
+~7.5B 总参数模型的示意):
 ```
 ================  Model Parameter Counts  ================
   TAG  : M1v
-  ckpt : /inspire/hdd/.../train_out/checkpoints/robotwin_kf0.1_vlmstage0.1/checkpoint_step_1200
-  Wan2.2 VAE                :   X.XX B  (XXX,XXX,XXX)   [1 file(s)]
-  UMT5 Text Encoder         :   X.XX B  (XXX,XXX,XXX)   [N file(s)]
-  Transformer backbone      :   X.XX B  (XXX,XXX,XXX)
-  + kf_aux_head (Latent #1) : XXX.X K  (XXX,XXX)
-  + stage_head  (Phase B)   : XXX.X K  (XXX,XXX)
+  ckpt : /inspire/hdd/.../checkpoints/robotwin_kf0.1_vlmstage0.1/checkpoint_step_1200
+  Wan2.2 VAE                : 247.0 M  (   247,000,000)   [1 file(s)]
+  UMT5 Text Encoder         :  5.50 B  ( 5,500,000,000)   [2 file(s)]
+  Transformer backbone      :  1.80 B  ( 1,799,212,279)
+  + kf_aux_head (Latent #1) : 393.3 K  (       393,345)
+  + stage_head  (Phase B)   : 394.4 K  (       394,376)
   ──────────────────────────────────────────────────────────
-  Transformer (subtotal)    :   X.XX B  (XXX,XXX,XXX)   [1 file(s)]
-  TOTAL (VAE + UMT5 + Xfmr) :   X.XX B  (XXX,XXX,XXX)
+  Transformer (subtotal)    :  1.80 B  ( 1,800,000,000)   [1 file(s)]
+  TOTAL (VAE + UMT5 + Xfmr) :  7.55 B  ( 7,547,000,000)
   (kf_aux_head / stage_head 推理时不调用;仅训练时用作辅助监督)
+==========================================================
+================  Compute Cost (estimates)  ==============
+  Memory footprint(仅权重,不含 KV cache / activations / 梯度):
+    bf16/fp16 (inference): VAE 471 MB | UMT5 10.24 GB | Xfmr 3.35 GB | TOTAL 14.06 GB
+    fp32      (training) : VAE 942 MB | UMT5 20.49 GB | Xfmr 6.71 GB | TOTAL 28.11 GB
+  Forward FLOPs(Kaplan ≈ 6 × P × N_tokens):
+    Transformer / token                : 10.80 GFLOPs
+    Transformer / forward (~1500 tok)  : 16.20 TFLOPs
+    Transformer / episode (~100 chunk) :  1.62 PFLOPs
+    UMT5 encode / prompt (~512 tok, 1×/ep)     : 16.90 TFLOPs
+    VAE encode/decode / pass (~256 tok)        : 379.39 GFLOPs
+  说明:TOKENS_PER_FORWARD/CHUNKS_PER_EPISODE 为粗估;training step ≈ 3× forward
+  FLOPs(含 backward);实测推理延迟见后续 infer 日志(典型 0.3–0.5 s/chunk on 4090)
 ==========================================================
 ```
 具体数字在第一次启动 server 时由日志给出,可手动 grep 到附录 C 的"关键数字一览"。
@@ -590,8 +603,14 @@ Transformer 主干 / kf_aux_head / stage_head 五件),便于报告里直接引�
   乘积,**完全不加载权重**,~100ms,绝不占 GPU。
 - **辅助头单独列**:`kf_aux_head` / `stage_head` 各 ~0.4M 参数,不到 Transformer
   主干 0.05%,**推理时不调用**(server `forward` 不走 `forward_train` 路径)。
+- **Memory 估算**:`params × bytes/param`,bf16 推理 vs fp32 训练分开列(报告
+  里写"推理峰值显存 ~14GB"就来自这里 + KV cache + activations 加成)。
+- **FLOPs 估算用 Kaplan rule**(`6·P·N`):简单稳健,业界惯用。对 Transformer
+  主干给"per token / per forward / per episode" 三档,UMT5/VAE 也各给一个
+  典型场景的估值。**这是上界估算**,真实可能略低(MoT 双流可能优化 attention)。
 - **手动单跑工具**:`python script/print_model_params.py --ckpt <任意 ckpt>` 不
-  起 server 也能查任何 ckpt 的参数量(对比 stock / M1 / M1v / M1v_WRONG 一目了然)。
+  起 server 也能查任何 ckpt 的参数量+计算开销(对比 stock / M1 / M1v / M1v_WRONG
+  一目了然)。
 
 ---
 
@@ -1667,7 +1686,7 @@ done
 | **Ablation-3 错误标记**(隐式;step 200 实测) | ✅ 探针 / 🟡 SR 预期 | §9.6 + §10.4;`run_ablation_implicit.sh` |
 | **Ablation-1/2 显式 CoT**(代码 + 单点冒烟通) | 🟡 完整 SR 预期 | §10.4;`run_ablation_explicit.sh` |
 | **手动两步式 latent eval**(出 dream_video) | ✅ 脚本就绪(`launch_server_pred_latent.sh` + `launch_client_latent.sh`,沿用 EVAL_ENV reference 风格,加 `TAG=M1\|M1v` 切 ckpt) | §12.11 |
-| **推理日志:模型参数量自动打印** | ✅ 两条路径(主仓库 inline + EVAL_ENV 走 wrapper pre-flight),**EVAL_ENV 源码绝对不动** | §6.6;`script/print_model_params.py` |
+| **推理日志:模型参数量 + 计算开销自动打印** | ✅ 两条路径(主仓库 inline + EVAL_ENV 走 wrapper pre-flight),含 memory footprint(bf16/fp32)+ Kaplan FLOPs(per token / forward / episode),**EVAL_ENV 源码绝对不动** | §6.6;`script/print_model_params.py` |
 | **第二个数据集 `_latsup`**(4 任务子集 VLM 阶段标注) | ✅ 数据生成代码同 §5.3,4 GPU 并行 ~1h | §5.5 |
 | **探针可复现包**(reproduce_probe + freeze_probe + canonical) | ✅ 4/4 PASS seed=0 字节级 | §12.10;`script/reproduce_probe.sh` + `train_out/probe/probe_canonical.json` |
 
@@ -1777,14 +1796,17 @@ LingBot 数据集、Qwen3.5-VL 模型等公共资源。
 
 ## 附录 C:关键数字一览(便于报告引用)
 
-- **模型规模**(`script/print_model_params.py` / server 启动日志,跑后填实值):
-  - Wan2.2 VAE:`__ B`
-  - UMT5 Text Encoder:`__ B`
-  - Transformer 主干(M1/M1v 同基座,只差辅助头权重):`__ B`
-  - `kf_aux_head`(Latent #1):`~0.4 M`(估算 = 3072×128 + 128 + 128×1 ≈ 393K)
-  - `stage_head`(Phase B):`~0.4 M`(估算 = 3072×128 + 128 + 128×8 ≈ 394K)
-  - **TOTAL(VAE + UMT5 + Xfmr)**:`__ B`
-  - 两个辅助头加起来约占 transformer 主干 `<0.05%`,**推理时不调用**
+- **模型规模 + 计算开销**(`script/print_model_params.py` / server 启动日志,跑后填实值):
+  - 参数量:VAE `__ B` | UMT5 `__ B` | Transformer 主干 `__ B` | TOTAL `__ B`
+  - `kf_aux_head` 0.39 M / `stage_head` 0.39 M(加起来 < 主干 0.05%,推理不调用)
+  - Memory footprint(权重,不含 KV/activations):
+    - bf16 推理:**~14 GB**(VAE 0.5G + UMT5 10.2G + Xfmr 3.4G,数字以实测为准)
+    - fp32 训练:**~28 GB**
+  - Forward FLOPs(Kaplan ≈ 6·P·N):
+    - Transformer / token:`__ GFLOPs` | / forward(~1500 tok):`__ TFLOPs` | / episode(~100 chunk):`__ PFLOPs`
+    - UMT5 编码 prompt(~512 tok,1×/集):`__ TFLOPs`
+    - VAE encode/decode / pass:`__ GFLOPs`
+  - 实测推理延迟:**~0.3–0.5 s/chunk on 4090**(server 启动后看 infer 日志)
 - 数据集:RoboTwin 2.0 aloha-agilex × **12 任务 × 500 ep = 6000 ep**(主集)
   + **`_latsup` 4 任务子集 × 500 ep = 2000 ep**(§5.5)
 - VLM 阶段标注覆盖:**500/500 OK × 12** = 100%,平均 **3.5–6 阶段/集**,**8 GPU 并行 ~1 小时**完成
