@@ -201,8 +201,9 @@ sii_wam_cot/
 | `run_ablation_explicit.sh` | **新增**。Ablation-1/2 一键三档对照(`cot_full` / `no_cot` / `shuffle_subtasks`),一个 M1 server + 6 任务 × 3 档客户端,VLM 接公网 Qwen3-VL-4B-Instruct(`qwen_api.py` 端点),末尾自动汇总 SR + ΔA1/ΔA2 表 + JSON |
 | `run_ablation_implicit.sh` | **新增**。Ablation-3 三阶段流水线:`PHASE=train` 训 M1v_WRONG → `PHASE=probe` 收 h_t + 跑探针(末尾自动打 stock/kf/kfvlm/wrongstage 四 ckpt val_acc 对照)→ `PHASE=eval` 4090 在线 SR;或 `PHASE=all` 全跑 |
 | `eval_route2_latent_cot.sh` | **新增**。一键评测两个 Latent-CoT ckpt(M1 + M1v):自动激活 venv、补齐 ckpt 软链、打开 RoboTwin 视频开关、跑 6 任务,末尾出 SR 汇总表。`bash` 直接调用,他人零配置可用 |
-| `launch_server_pred_latent.sh` | **新增**。完全沿用 EVAL_ENV reference 风格的 latent server 启动器,加 `TAG=M1\|M1v` 切 ckpt(sed 改 eval_env 配置 + 自动补 vae/tokenizer/text_encoder 软链 + Ctrl-C 自动复原)。出 dream_video |
+| `launch_server_pred_latent.sh` | **新增**。完全沿用 EVAL_ENV reference 风格的 latent server 启动器,加 `TAG=M1\|M1v` 切 ckpt(sed 改 eval_env 配置 + 自动补 vae/tokenizer/text_encoder 软链 + Ctrl-C 自动复原)。**启动前自动调 `print_model_params.py` 打印模型参数量**(EVAL_ENV server 源码不动)。出 dream_video |
 | `launch_client_latent.sh` | **新增**。配套 latent client 启动器,接受 `TAG=M1\|M1v / TASK=<robotwin 任务> / TEST_NUM=N / PORT=...`,内部 `cd EVAL_ENV` 跑 `eval_polict_client_openpi_latent`,与 launch_server_pred_latent.sh 配对。dream_video 落到 `outputs_latent_<TAG>/` |
+| `print_model_params.py` | **新增**。轻量级模型参数量统计:只读 `*.safetensors` 文件 metadata,**不加载权重 / 不需 GPU,~100ms**。breakdown 到 VAE / UMT5 / Transformer 主干 / kf_aux_head / stage_head 五件。用法:`python script/print_model_params.py --ckpt <ckpt_dir> [--tag M1\|M1v]`,被 `launch_server_pred_latent.sh` 自动 pre-flight 调用 |
 | `reproduce_probe.sh` | **新增**。考官端 §6/§10.4 探针消融**秒级可复现**(无需 GPU):从 `train_out/probe/h_*.pt` dump 跑 latent_probe,与 `probe_canonical.json` 的 expected val_acc 对照,PASS/FAIL 给定 |
 | `freeze_probe.sh` | **新增**。作者端一次性冻结:把当前 `h_*.pt` 的 sha256 + `results_*.json` 的 val_acc 写入 `probe_canonical.json`,作为复现的标准答案 |
 
@@ -550,6 +551,47 @@ return (latent_hidden_states, action_hidden_states,
 tensor`。修复:加载完后扫所有子模块,**仅对参数仍在 meta 的子模块** `to_empty(cpu)` +
 `reset_parameters()` + `sub.to(dtype)`,已加载权重不动。推理时这两个头**不被调用**(server
 只走 video+action 路径),所以 ckpt 没保存这两头的权重也无妨,会随机初始化但不影响 SR。
+
+### 6.6 推理日志:模型参数量自动打印
+
+每次启动 server 都会在日志开头打一份**模型参数规模 breakdown**(VAE / UMT5 /
+Transformer 主干 / kf_aux_head / stage_head 五件),便于报告里直接引用"模型规
+模 / 推理开销"那一格。两个 server 实现路径不同(都不影响:**EVAL_ENV 源码绝对
+不动**):
+
+| Server | 怎么打 | 实现位置 |
+|---|---|---|
+| **主仓库** `wan_va/wan_va_server.py`(`launch_server.sh` 等用) | `__init__` 里 `load_transformer` 之后直接遍历 `parameters()` 数,通过 `logger.info` 多行 INFO | 已 inline 在 `wan_va/wan_va_server.py:_log_param_counts` |
+| **EVAL_ENV** `wan_va/wan_va_server_predvideo.py`(`launch_server_pred_latent.sh` 用) | **不动 EVAL_ENV 源码**;在我们 wrapper `script/launch_server_pred_latent.sh` 里**启动 server 之前** pre-flight 调用 `python script/print_model_params.py --ckpt <CKPT> --tag M1\|M1v`,只读 safetensors metadata(**不加载权重 / 不需 GPU,~100ms**)| `script/print_model_params.py` + `script/launch_server_pred_latent.sh` |
+
+两条路径输出格式完全一致,日志大致这样:
+```
+================  Model Parameter Counts  ================
+  TAG  : M1v
+  ckpt : /inspire/hdd/.../train_out/checkpoints/robotwin_kf0.1_vlmstage0.1/checkpoint_step_1200
+  Wan2.2 VAE                :   X.XX B  (XXX,XXX,XXX)   [1 file(s)]
+  UMT5 Text Encoder         :   X.XX B  (XXX,XXX,XXX)   [N file(s)]
+  Transformer backbone      :   X.XX B  (XXX,XXX,XXX)
+  + kf_aux_head (Latent #1) : XXX.X K  (XXX,XXX)
+  + stage_head  (Phase B)   : XXX.X K  (XXX,XXX)
+  ──────────────────────────────────────────────────────────
+  Transformer (subtotal)    :   X.XX B  (XXX,XXX,XXX)   [1 file(s)]
+  TOTAL (VAE + UMT5 + Xfmr) :   X.XX B  (XXX,XXX,XXX)
+  (kf_aux_head / stage_head 推理时不调用;仅训练时用作辅助监督)
+==========================================================
+```
+具体数字在第一次启动 server 时由日志给出,可手动 grep 到附录 C 的"关键数字一览"。
+
+**设计要点**:
+- **EVAL_ENV 不动**:`launch_server_pred_latent.sh` 是我们的 wrapper,在 `cd
+  EVAL_ENV` 之前就跑 `print_model_params.py`,EVAL_ENV 源码一字未改 → 不会
+  因升级 / 同步导致评测环境崩。
+- **safetensors metadata 路径**:`safe_open(...).keys()` + 每个 key 的 shape
+  乘积,**完全不加载权重**,~100ms,绝不占 GPU。
+- **辅助头单独列**:`kf_aux_head` / `stage_head` 各 ~0.4M 参数,不到 Transformer
+  主干 0.05%,**推理时不调用**(server `forward` 不走 `forward_train` 路径)。
+- **手动单跑工具**:`python script/print_model_params.py --ckpt <任意 ckpt>` 不
+  起 server 也能查任何 ckpt 的参数量(对比 stock / M1 / M1v / M1v_WRONG 一目了然)。
 
 ---
 
@@ -1625,6 +1667,7 @@ done
 | **Ablation-3 错误标记**(隐式;step 200 实测) | ✅ 探针 / 🟡 SR 预期 | §9.6 + §10.4;`run_ablation_implicit.sh` |
 | **Ablation-1/2 显式 CoT**(代码 + 单点冒烟通) | 🟡 完整 SR 预期 | §10.4;`run_ablation_explicit.sh` |
 | **手动两步式 latent eval**(出 dream_video) | ✅ 脚本就绪(`launch_server_pred_latent.sh` + `launch_client_latent.sh`,沿用 EVAL_ENV reference 风格,加 `TAG=M1\|M1v` 切 ckpt) | §12.11 |
+| **推理日志:模型参数量自动打印** | ✅ 两条路径(主仓库 inline + EVAL_ENV 走 wrapper pre-flight),**EVAL_ENV 源码绝对不动** | §6.6;`script/print_model_params.py` |
 | **第二个数据集 `_latsup`**(4 任务子集 VLM 阶段标注) | ✅ 数据生成代码同 §5.3,4 GPU 并行 ~1h | §5.5 |
 | **探针可复现包**(reproduce_probe + freeze_probe + canonical) | ✅ 4/4 PASS seed=0 字节级 | §12.10;`script/reproduce_probe.sh` + `train_out/probe/probe_canonical.json` |
 
@@ -1734,7 +1777,16 @@ LingBot 数据集、Qwen3.5-VL 模型等公共资源。
 
 ## 附录 C:关键数字一览(便于报告引用)
 
-- 数据集:RoboTwin 2.0 aloha-agilex × **12 任务 × 500 ep = 6000 ep**
+- **模型规模**(`script/print_model_params.py` / server 启动日志,跑后填实值):
+  - Wan2.2 VAE:`__ B`
+  - UMT5 Text Encoder:`__ B`
+  - Transformer 主干(M1/M1v 同基座,只差辅助头权重):`__ B`
+  - `kf_aux_head`(Latent #1):`~0.4 M`(估算 = 3072×128 + 128 + 128×1 ≈ 393K)
+  - `stage_head`(Phase B):`~0.4 M`(估算 = 3072×128 + 128 + 128×8 ≈ 394K)
+  - **TOTAL(VAE + UMT5 + Xfmr)**:`__ B`
+  - 两个辅助头加起来约占 transformer 主干 `<0.05%`,**推理时不调用**
+- 数据集:RoboTwin 2.0 aloha-agilex × **12 任务 × 500 ep = 6000 ep**(主集)
+  + **`_latsup` 4 任务子集 × 500 ep = 2000 ep**(§5.5)
 - VLM 阶段标注覆盖:**500/500 OK × 12** = 100%,平均 **3.5–6 阶段/集**,**8 GPU 并行 ~1 小时**完成
 - 训练:`λ_kf=0.1, λ_st=0.1, batch=1, lr=1e-5, AdamW(β1=0.9, β2=0.95, wd=0.1), warmup=10, FSDP, 8×H200, step 1200 收敛`
 - 收敛 loss:`L_video≈0.12, L_action≈1e-3, L_kf≈2e-3, L_stage≈0.03`
