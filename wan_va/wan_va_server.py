@@ -38,6 +38,54 @@ from utils import (
 )
 
 
+def _log_param_counts(vae, text_encoder, transformer, ckpt_path=None):
+    """推理启动期把 4 个模型组件的参数量打到日志(给报告"模型规模/推理开销"
+    一节做数据)。在 FSDP shard 之前调用,得到 FULL model 参数量而不是单 rank
+    分片。两个辅助头(kf_aux_head / stage_head)若存在则单独列出,推理不调
+    它们,只是看本项目改造引入了多少新参数。"""
+
+    def _n(m):
+        return sum(p.numel() for p in m.parameters() if p.numel() > 0)
+
+    def _fmt(n):
+        if n >= 1e9:
+            return f"{n / 1e9:6.2f} B"
+        if n >= 1e6:
+            return f"{n / 1e6:6.1f} M"
+        return f"{n / 1e3:6.1f} K"
+
+    p_vae = _n(vae)
+    p_te = _n(text_encoder)
+    p_xf = _n(transformer)
+    p_kf = (_n(transformer.kf_aux_head)
+            if hasattr(transformer, "kf_aux_head") else 0)
+    p_st = (_n(transformer.stage_head)
+            if hasattr(transformer, "stage_head") else 0)
+    p_xf_main = p_xf - p_kf - p_st
+    p_total = p_vae + p_te + p_xf
+
+    lines = [
+        "",
+        "================  Model Parameter Counts  ================",
+        f"  Wan2.2 VAE                : {_fmt(p_vae)}  ({p_vae:>14,d})",
+        f"  UMT5 Text Encoder         : {_fmt(p_te)}  ({p_te:>14,d})",
+        f"  Transformer backbone      : {_fmt(p_xf_main)}  ({p_xf_main:>14,d})",
+        f"  + kf_aux_head (Latent #1) : {_fmt(p_kf)}  ({p_kf:>14,d})",
+        f"  + stage_head  (Phase B)   : {_fmt(p_st)}  ({p_st:>14,d})",
+        "  ──────────────────────────────────────────────────────────",
+        f"  Transformer (subtotal)    : {_fmt(p_xf)}  ({p_xf:>14,d})",
+        f"  TOTAL (VAE + UMT5 + Xfmr) : {_fmt(p_total)}  ({p_total:>14,d})",
+    ]
+    if ckpt_path:
+        lines.append(f"  ckpt = {ckpt_path}")
+    lines.append(
+        "  (kf_aux_head / stage_head 推理时不调用;仅训练时用作辅助监督)")
+    lines.append(
+        "==========================================================")
+    for ln in lines:
+        logger.info(ln)
+
+
 class VA_Server:
 
     def __init__(self, job_config):
@@ -84,6 +132,12 @@ class VA_Server:
             torch_device=self.device,
             attn_mode="torch"
         )
+
+        # ----- 推理日志:模型参数量(必须在 FSDP shard_model 之前算,否则只
+        # 看到本 rank 的分片;inference 只有 1 rank,影响其实有限,但放前面
+        # 干净。breakdown:VAE / UMT5 / Transformer 主干 / 两个辅助头)。
+        _log_param_counts(self.vae, self.text_encoder, self.transformer,
+                          job_config.wan22_pretrained_model_name_or_path)
         shard_fn = shard_model
         self.transformer = _configure_model(model=self.transformer,
                                             shard_fn=shard_fn,

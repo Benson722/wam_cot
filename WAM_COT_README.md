@@ -201,6 +201,8 @@ sii_wam_cot/
 | `run_ablation_explicit.sh` | **新增**。Ablation-1/2 一键三档对照(`cot_full` / `no_cot` / `shuffle_subtasks`),一个 M1 server + 6 任务 × 3 档客户端,VLM 接公网 Qwen3-VL-4B-Instruct(`qwen_api.py` 端点),末尾自动汇总 SR + ΔA1/ΔA2 表 + JSON |
 | `run_ablation_implicit.sh` | **新增**。Ablation-3 三阶段流水线:`PHASE=train` 训 M1v_WRONG → `PHASE=probe` 收 h_t + 跑探针(末尾自动打 stock/kf/kfvlm/wrongstage 四 ckpt val_acc 对照)→ `PHASE=eval` 4090 在线 SR;或 `PHASE=all` 全跑 |
 | `eval_route2_latent_cot.sh` | **新增**。一键评测两个 Latent-CoT ckpt(M1 + M1v):自动激活 venv、补齐 ckpt 软链、打开 RoboTwin 视频开关、跑 6 任务,末尾出 SR 汇总表。`bash` 直接调用,他人零配置可用 |
+| `launch_server_pred_latent.sh` | **新增**。完全沿用 EVAL_ENV reference 风格的 latent server 启动器,加 `TAG=M1\|M1v` 切 ckpt(sed 改 eval_env 配置 + 自动补 vae/tokenizer/text_encoder 软链 + Ctrl-C 自动复原)。出 dream_video |
+| `launch_client_latent.sh` | **新增**。配套 latent client 启动器,接受 `TAG=M1\|M1v / TASK=<robotwin 任务> / TEST_NUM=N / PORT=...`,内部 `cd EVAL_ENV` 跑 `eval_polict_client_openpi_latent`,与 launch_server_pred_latent.sh 配对。dream_video 落到 `outputs_latent_<TAG>/` |
 | `reproduce_probe.sh` | **新增**。考官端 §6/§10.4 探针消融**秒级可复现**(无需 GPU):从 `train_out/probe/h_*.pt` dump 跑 latent_probe,与 `probe_canonical.json` 的 expected val_acc 对照,PASS/FAIL 给定 |
 | `freeze_probe.sh` | **新增**。作者端一次性冻结:把当前 `h_*.pt` 的 sha256 + `results_*.json` 的 val_acc 写入 `probe_canonical.json`,作为复现的标准答案 |
 
@@ -271,6 +273,8 @@ train_out/
 | `Pool(128)` fork-after-CUDA 死锁 | `MultiLatentLeRobotDataset` 默认 worker=128 | 改串行 + 单 repo 不 fork |
 | `EADDRINUSE` 训练/评测端口被占 | torchrun MASTER_PORT 残留 | `MASTER_PORT=29533` 等替代端口;评测脚本三轮端口轮换 + bash `/dev/tcp` 探活(免 ss) |
 | 4090 镜像无 `ss` | iproute2 未装 | 评测脚本用 `(exec 3<>/dev/tcp/127.0.0.1/$p)` bash 内建探活 |
+| `qwen_stage_annotate` 全 SKIP `No module named imageio` | 默认 `python` 解析到 group3 公开 venv(serve_qwen 用的那个),它没装 `imageio`/`imageio-ffmpeg`(视频解码用) | 二选一:① `/inspire/qb-ilm2/.../public/group3/.venv/bin/pip install imageio imageio-ffmpeg Pillow` 一次性给该 venv 装;② 客户端命令把 `python` 改成 lingbot venv 绝对路径 `/inspire/qb-ilm2/.../26220077/lingbot-va/.venv/bin/python` |
+| `latent_probe.py` 同 dump 跨次跑 val_acc 漂移 ~0.02 | `_train_probe` 中 `nn.Linear` 初始化未受 `args.seed` 控制 → init 每次随机 | 在 `main()` 调用 `_train_probe` 前显式 `torch.manual_seed(args.seed)` + `np.random.seed(args.seed)` → 字节级可复现(reproduce_probe.sh 4/4 PASS Δ=+0.000 的前提) |
 
 ---
 
@@ -399,6 +403,65 @@ RoboTwin 2.0 (开源仿真器) ─ 专家演示
               └─ 本项目派生: keyframe_annotate.py    → meta/keyframes.jsonl
               └─ 本项目派生: qwen_stage_annotate.py  → meta/stages.jsonl
                                   (调用本地 Qwen3.5-VL,无外网)
+```
+
+### 5.5 第二个数据集变体 `_latsup`(4 任务子集,用于额外消融/验证)
+
+为快速做小规模变体训练 / 评测,本项目还在 `_latsup`(latent supervision)子集
+上跑了 VLM 阶段标注:
+
+```
+/inspire/qb-ilm2/.../lerobot_robotwin_eef_aug_500_stable_latsup/
+├── beat_block_hammer-aloha-agilex_randomized_500-1000   (500 ep)
+├── dump_bin_bigbin-aloha-agilex_randomized_500-1000     (500)
+├── move_stapler_pad-aloha-agilex_randomized_500-1000    (500)
+└── open_microwave-aloha-agilex_randomized_500-1000      (500)
+                                                          (总 2000 ep,4 任务)
+```
+
+**生成命令**(与 §12.3 一致,只是用 4 GPU 而非 8 —— 因为只有 4 个任务、shard
+最多 4 路,8 GPU 会闲 4 张):
+
+```bash
+LOG=/inspire/qb-ilm2/project/26summer-camp-11/26220077/lingbot-va/train_out
+DS=/inspire/qb-ilm2/project/26summer-camp-11/public/group3/lingbot-robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_aug_500_stable_latsup
+mkdir -p "$LOG"
+
+# 4 个 serve_qwen (GPU 0-3, 端口 8000-8003)
+for k in $(seq 0 3); do
+  CUDA_VISIBLE_DEVICES=$k PORT=$((8000+k)) nohup \
+    /inspire/qb-ilm2/project/26summer-camp-11/.venv/bin/python \
+    /inspire/qb-ilm2/project/26summer-camp-11/serve_qwen.py \
+    > "$LOG/serveqwen_latsup_gpu${k}.log" 2>&1 &
+  sleep 2
+done
+for k in $(seq 0 3); do
+  until grep -q "Application startup complete" "$LOG/serveqwen_latsup_gpu${k}.log" 2>/dev/null; do sleep 3; done
+  echo "[latsup] server $k ready"
+done
+
+# 4 个 shard 客户端
+for k in $(seq 0 3); do
+  nohup python /inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/evaluation/robotwin/qwen_stage_annotate.py \
+    --dataset "$DS" --recursive --frames 4 --max-tokens 256 --timeout 120 --resume \
+    --num-shards 4 --shard $k --base-url http://127.0.0.1:$((8000+k))/v1 \
+    > "$LOG/latsup_stage_shard${k}.log" 2>&1 &
+  sleep 1
+done
+tail -f "$LOG"/latsup_stage_shard*.log
+```
+
+**注意 — 依赖坑(踩过)**:`python` 必须解析到**装了 `imageio`+`imageio-ffmpeg`** 的
+venv,否则 `qwen_stage_annotate.py` 的 `_read_frames` 会全数 SKIP(每集都报
+`No module named 'imageio'`)。两条修法二选一:
+
+```bash
+# (a) 给当前 venv 装 imageio (一次,永久)
+/inspire/qb-ilm2/project/26summer-camp-11/.venv/bin/pip install imageio imageio-ffmpeg Pillow
+
+# (b) 显式用 lingbot venv 的 python (替换 'python' 为绝对路径):
+LINGBOT_PY=/inspire/qb-ilm2/project/26summer-camp-11/26220077/lingbot-va/.venv/bin/python
+$LINGBOT_PY /inspire/hdd/.../qwen_stage_annotate.py ...
 ```
 
 ---
@@ -1498,6 +1561,51 @@ bash script/reproduce_probe.sh        # 一致性自检
 > GPU/无模型加载的情况下**秒级再现** §6 / §10.4 的全部 val_acc 数字
 > (tolerance ±0.01)。从零复跑 GPU 侧 forward 可见 §12.5 命令链。
 
+### 12.11 两步式手动 eval(launch_server_pred_latent + launch_client_latent)
+
+最稳的"出 dream_video"复测路径(完全沿用 EVAL_ENV reference 脚本的同款风格,
+我们只加了 `TAG=M1/M1v` 切 ckpt;**4090 实例**下用)。两个终端、一行命令各:
+
+```bash
+# 终端 1 —— 启 M1 server (会自动 sed eval_env 配置切到 M1 ckpt + 补 vae/tok/te 软链,
+#         Ctrl-C 自动复原配置)
+TAG=M1 bash /inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/script/launch_server_pred_latent.sh
+# 看到 "server listening on 0.0.0.0:29056" 即就绪
+
+# 终端 2 —— 跑 M1 client 单任务
+TAG=M1 TASK=hanging_mug TEST_NUM=10 \
+  bash /inspire/hdd/project/26summer-camp-11/26220077/lingbot-va/script/launch_client_latent.sh
+
+# 6 任务循环(同一 server)
+for t in handover_block handover_mic hanging_mug blocks_ranking_size beat_block_hammer lift_pot; do
+  TAG=M1 TASK=$t TEST_NUM=10 \
+    bash /inspire/hdd/.../script/launch_client_latent.sh
+done
+```
+
+切到 M1v(必须**换端口**或先 `Ctrl-C` 上一个 server):
+```bash
+# 终端 1
+TAG=M1v START_PORT=29066 MASTER_PORT=29071 \
+  bash /inspire/hdd/.../script/launch_server_pred_latent.sh
+# 终端 2
+for t in handover_block handover_mic hanging_mug blocks_ranking_size beat_block_hammer lift_pot; do
+  TAG=M1v TASK=$t TEST_NUM=10 PORT=29066 \
+    bash /inspire/hdd/.../script/launch_client_latent.sh
+done
+```
+
+**产物**(分 TAG 分目录,不互相覆盖):
+
+- dream_video → `$EVAL_ENV/visualization_predvideo_{M1,M1v}/`
+- "想象 vs 真实"对比 mp4 → `$EVAL_ENV/results_latent_{M1,M1v}/stseed-*/visualization/<task>/`
+- latent dump(供后续可视化/分析)→ `$EVAL_ENV/outputs_latent_{M1,M1v}/`
+- RoboTwin sapien 视频 + `_result.txt` → `$ROBOTWIN/eval_result/<task>/ACT/demo_clean/{M1,M1v}/<ts>/`
+
+**与 §12.6 一键 `eval_route2_latent_cot.sh` 的关系**:`§12.11` 是**手动两步式**
+(更稳、更显式、出错也清楚);`§12.6` 是把这两步自动编排成一条 `bash`(适合
+他人零配置)。等效。
+
 ---
 
 ## 13. 诚实边界与未完成项
@@ -1516,6 +1624,9 @@ bash script/reproduce_probe.sh        # 一致性自检
 | **VLM 过程性评判**(judge_completion) | ✅(4 任务实测) | §9.5;`judge_completion.py` |
 | **Ablation-3 错误标记**(隐式;step 200 实测) | ✅ 探针 / 🟡 SR 预期 | §9.6 + §10.4;`run_ablation_implicit.sh` |
 | **Ablation-1/2 显式 CoT**(代码 + 单点冒烟通) | 🟡 完整 SR 预期 | §10.4;`run_ablation_explicit.sh` |
+| **手动两步式 latent eval**(出 dream_video) | ✅ 脚本就绪(`launch_server_pred_latent.sh` + `launch_client_latent.sh`,沿用 EVAL_ENV reference 风格,加 `TAG=M1\|M1v` 切 ckpt) | §12.11 |
+| **第二个数据集 `_latsup`**(4 任务子集 VLM 阶段标注) | ✅ 数据生成代码同 §5.3,4 GPU 并行 ~1h | §5.5 |
+| **探针可复现包**(reproduce_probe + freeze_probe + canonical) | ✅ 4/4 PASS seed=0 字节级 | §12.10;`script/reproduce_probe.sh` + `train_out/probe/probe_canonical.json` |
 
 ### 13.2 已用预期值填好,代码就绪可任意时间复测
 
@@ -1601,6 +1712,7 @@ LingBot 数据集、Qwen3.5-VL 模型等公共资源。
 | Ablation-1/2 显式 CoT 一键 | `script/run_ablation_explicit.sh` |
 | Ablation-3 隐式 CoT 三阶段 | `script/run_ablation_implicit.sh`(`PHASE=train\|probe\|eval\|all`) |
 | 一键评 M1 + M1v(他人 bash 直接跑) | `script/eval_route2_latent_cot.sh` |
+| 手动两步式 eval(server+client 各一) | `script/launch_server_pred_latent.sh`(`TAG=M1\|M1v`)+ `script/launch_client_latent.sh`(`TAG / TASK / TEST_NUM / PORT`),沿用 EVAL_ENV reference 风格,见 §12.11 |
 | 探针消融可复现包(无 GPU 秒级) | `script/reproduce_probe.sh` + `script/freeze_probe.sh` + `train_out/probe/probe_canonical.json` |
 | 训练/推理配置 | `wan_va/configs/{va_robotwin_train_cfg, va_robotwin_cfg, va_robotwin_train_wrongstage_cfg}.py` |
 | 训练产物根 | `train_out/`(软链 qb-ilm2) |
