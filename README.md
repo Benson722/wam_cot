@@ -1,581 +1,509 @@
-<h1 align="center">LingBot-VA: Causal World Modeling for Robot Control</h1>
+# 26 夏令营 WAM-CoT 项目复现说明(从零起步)
 
-<p align="center">
-  <a href="https://arxiv.org/abs/2601.21998"><img src="https://img.shields.io/static/v1?label=Paper&message=PDF&color=red&logo=arxiv"></a>
-  <a href="https://technology.robbyant.com/lingbot-va"><img src="https://img.shields.io/badge/Project-Website-blue"></a>
-  <a href="https://huggingface.co/collections/robbyant/lingbot-va"><img src="https://img.shields.io/static/v1?label=%F0%9F%A4%97%20Model&message=HuggingFace&color=orange"></a>
-  <a href="https://modelscope.cn/collections/Robbyant/LingBot-VA"><img src="https://img.shields.io/static/v1?label=%F0%9F%A4%96%20Model&message=ModelScope&color=purple"></a>
-  <a href="LICENSE.txt"><img src="https://img.shields.io/badge/License-Apache--2.0-green"></a>
-</p>
-
-<p align="center">
-  <img src="assets/teaser_v3.png" width="100%">
-</p>
-
-
-
-https://github.com/user-attachments/assets/cec7b7a6-953b-4fa4-8f1a-47efc1fce547
-
-
-
-
-## Table of Contents
-
-- [News](#-news)
-- [Model Download](#-model-download)
-- [Quick Start](#️-quick-start)
-  - [Installation](#installation)
-  - [attn_mode Configuration](#️-important-attn_mode-configuration)
-  - [Deploying LingBot-VA for Inference](#deploying-lingbot-va-for-inference)
-    - [Evaluation on RoboTwin-2.0](#evaluation-on-robotwin-20)
-    - [Evaluation on LIBERO](#evaluation-on-libero)
-    - [Run Image to Video-Action Generation](#run-image-to-video-action-generation)
-  - [Post-Training LingBot-VA](#post-training-lingbot-va)
-    - [Data Preparation](#data-preparation)
-    - [Custom Dataset Preparation](#custom-dataset-preparation)
-    - [Training](#training)
-- [Performance](#-performance)
-  - [Simulation Evaluation](#simulation-evaluation)
-  - [Real-world Deployment](#real-world-deployment)
-- [License](#-license)
-- [Citation](#citation)
-- [Acknowledgments](#-acknowledgments)
+> 本文档目标:任何人(考官/同行/未来的你)按本文从零跑通**全部**:
+> 数据生成 → 训练 → 评测 → 离线探针 → 消融 → 日志归档。**只写命令 + 期望
+> 输出**;原理与细节见 `WAM_COT_README.md`,训练专项见 `H200_TRAINING.md`。
+>
+> 三类复现路径任选:
+> - 🟢 **最小复现**(无 GPU、~1 分钟):只验证 §6 探针消融数字 → 见 §10
+> - 🟡 **评测复现**(4090 实例、~3 小时):用已训 ckpt 出 SR + dream_video → 见 §5
+> - 🔴 **完全复现**(H200 + 4090、~10 小时):数据 → 训练 → 评测 → 探针全跑 → 见 §1–§9 顺序执行
 
 ---
 
-## 💫 Meet **LingBot-VA**!  We've built an AR diffusion framework for simultaneous world modeling and action! 🤖✨
+## 目录
 
-**LingBot-VA** has focused on:
-- **Autoregressive Video-Action World Modeling**: Architecturally unifies visual dynamics prediction and action inference within a single interleaved sequence while maintaining their conceptual distinction.
-- **High-efficiency Execution**: A dual-stream mixture-of-transformers(MoT) architecture with Asynchronous Execution and KV Cache.
-- **Long-Horizon Performance and Generalization**: High improvements in sample efficiency, long-horizon success rates, and generalization to novel scenes.
-
-# 🚀 News
-- **[2026-04-24]** Weights for post-train on **LIBERO-LONG** released! (**IMPORTANT**: Ensure that `va_libero_cfg.action_snr_shift`, `va_libero_cfg.used_action_channel_ids` and `va_libero_cfg.norm_stat` in [`wan_va/configs/va_libero_cfg.py`](wan_va/configs/va_libero_cfg.py) are synchronized with the latest version of the repository.)
-- **[2026-04-08]** Post-training and inference code for the **LIBERO** dataset is now available!
-- **[2026-02-17]** Post-training code and dataset released! Support fine-tuning LingBot-VA on custom robotic manipulation datasets.
-- **[2026-01-29]** Weights and code for shared backbone released! Please stay tuned for our separated version!
-
-
-
+1. [环境](#1-环境)
+2. [数据准备](#2-数据准备)
+3. [训练](#3-训练3-个-ckptm1--m1v--m1v_wrong)
+4. [推理日志(模型参数 + 计算开销自动打印)](#4-推理日志模型参数--计算开销自动打印)
+5. [在线 RoboTwin 评测](#5-在线-robotwin-评测)
+6. [离线探针消融(§6 必做消融)](#6-离线探针消融6-必做消融)
+7. [三项正式消融(PDF 必做)](#7-三项正式消融pdf-必做)
+8. [VLM 过程性评判(可选)](#8-vlm-过程性评判可选)
+9. [产物位置一览](#9-产物位置一览)
+10. [最小复现路径(考官 1 分钟,无 GPU)](#10-最小复现路径考官-1-分钟无-gpu)
+11. [常见问题速查](#11-常见问题速查)
 
 ---
 
+## 1. 环境
 
+### 1.1 两台实例(分别用途)
 
-# 📦 Model Download
-- **Pretrained Checkpoints for Post-Training**
+| 实例 | 用途 | GPU | 外网 | venv |
+|---|---|---|---|---|
+| **H200** | **训练 / 数据生成 / 离线探针** | 8 × H200 (141 GB) | 否 | `/inspire/qb-ilm2/project/26summer-camp-11/26220077/lingbot-va/.venv` |
+| **4090**(镜像 `26summer-robocasa:260516`) | **在线 RoboTwin 评测**(sapien 仿真在此) | 1 × 4090 (48 GB) | 是 | 镜像默认 Python(含 sapien + RoboTwin) |
 
-| Model Name | Huggingface Repository | ModelScope Repository  | Description |
-| :--- | :--- | :--- | :--- |
-| lingbot-va-base &nbsp; | [🤗 robbyant/lingbot-va-base &nbsp;](https://huggingface.co/robbyant/lingbot-va-base) | [🤖 Robbyant/lingbot-va-base &nbsp;](https://modelscope.cn/models/Robbyant/lingbot-va-base)  | LingBot-VA w/ shared backbone|
-| lingbot-va-posttrain-robotwin &nbsp; | [🤗 robbyant/lingbot-va-posttrain-robotwin &nbsp;](https://huggingface.co/robbyant/lingbot-va-posttrain-robotwin) | [🤖 Robbyant/lingbot-va-posttrain-robotwin &nbsp;](https://modelscope.cn/models/Robbyant/lingbot-va-posttrain-robotwin)  | LingBot-VA-Posttrain-Robotwin w/ shared backbone|
-| lingbot-va-posttrain-libero-long &nbsp; | [🤗 robbyant/lingbot-va-posttrain-libero-long &nbsp;](https://huggingface.co/robbyant/lingbot-va-posttrain-libero-long) | [🤖 Robbyant/lingbot-va-posttrain-libero-long &nbsp;](https://modelscope.cn/models/Robbyant/lingbot-va-posttrain-libero-long)  | LingBot-VA-Posttrain-LIBERO-LONG w/ shared backbone|
-
-- **Post-Training Dataset**
-
-| Dataset Name | Huggingface Repository | ModelScope Repository | Description |
-| :--- | :--- | :--- | :--- |
-| robotwin-clean-and-aug-lerobot &nbsp; | [🤗 robbyant/robotwin-clean-and-aug-lerobot](https://huggingface.co/datasets/robbyant/robotwin-clean-and-aug-lerobot) | [🤖 Robbyant/robotwin-clean-and-aug-lerobot](https://modelscope.cn/datasets/Robbyant/robotwin-clean-and-aug-lerobot) | Cleaned & augmented RoboTwin dataset in LeRobot format for post-training |
-| libero-long-lerobot &nbsp; | [🤗 robbyant/libero-long-lerobot](https://huggingface.co/datasets/robbyant/libero-long-lerobot) | [🤖 Robbyant/libero-long-lerobot](https://modelscope.cn/datasets/Robbyant/libero-long-lerobot) | LIBERO-Long dataset in LeRobot format for post-training |
----
-
-# 🛠️ Quick Start
-
-## Installation
-**Requirements**
- • Python == 3.10.16
- • Pytorch == 2.9.0
- • CUDA 12.6
+### 1.2 仓库 / 路径速查(SII 共享 /inspire 文件系统)
 
 ```bash
-pip install torch==2.9.0 torchvision==0.24.0 torchaudio==2.9.0 --index-url https://download.pytorch.org/whl/cu126
-pip install websockets einops diffusers==0.36.0 transformers==4.55.2 accelerate msgpack opencv-python matplotlib ftfy easydict
-pip install flash-attn --no-build-isolation
+# 主仓库(训练 / 通用代码)
+REPO=/inspire/hdd/project/26summer-camp-11/26220077/lingbot-va
+
+# LingBot venv(含 torch 2.9 / diffusers / FSDP / wandb / safetensors / sklearn ...)
+LINGBOT_VENV=/inspire/qb-ilm2/project/26summer-camp-11/26220077/lingbot-va/.venv
+
+# RoboTwin 仓库(4090 实例,sapien 仿真在这)
+ROBOTWIN=/inspire/qb-ilm2/project/26summer-camp-11/public/group3/RoboTwin
+
+# EVAL_ENV(latent 评测原 reference,本项目不动它,只 cp 入 wrapper 见 §5)
+EVAL_ENV=/inspire/qb-ilm2/project/26summer-camp-11/public/group3/eval_env/sii_wam_cot/lingbot-va_goal_cond_cot
+
+# 数据集(12 任务主集 + 4 任务 _latsup 子集)
+DS_MAIN=/inspire/qb-ilm2/project/26summer-camp-11/public/group3/lingbot-robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_aug_500_stable
+DS_LATSUP=/inspire/qb-ilm2/project/26summer-camp-11/public/group3/lingbot-robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_aug_500_stable_latsup
+
+# 基座 ckpt(官方 LingBot-VA RoboTwin posttrain)
+BS=$REPO/checkpoints/lingbot-va-posttrain-robotwin
+
+# 本项目训出的 ckpt(我们的 3 个交付)
+M1_CKPT=$REPO/train_out/checkpoints/checkpoint_step_1200                              # kf-only
+M1V_CKPT=$REPO/train_out/checkpoints/robotwin_kf0.1_vlmstage0.1/checkpoint_step_1200  # kf + VLM (主交付)
+M1V_WRONG_CKPT=$REPO/train_out/checkpoints/robotwin_kf0.1_vlmstage0.1_WRONG/checkpoint_step_200
 ```
 
+### 1.3 一次性环境准备(H200 第一次部署时跑一遍)
 
-## ⚠️ Important: `attn_mode` Configuration
+```bash
+# 训练输出目录软链到 qb-ilm2 大盘(防 hdd 11G 配额爆,~50 GB ckpt+wandb+logs)
+ln -sfn /inspire/qb-ilm2/project/26summer-camp-11/26220077/lingbot-va/train_out \
+        $REPO/train_out
 
-> **You MUST change the `attn_mode` setting depending on whether you are training or running inference.**
-> Since LingBot-VA is loaded via `from_pretrained`, this parameter is read from the model folder's **`transformer/config.json`**.
-> You need to **manually edit** this file before launching.
->
-> | Mode | `attn_mode` value | Notes |
-> |---|---|---|
-> | **Training** | `"flex"` | Required for training. **Will not work** for inference. |
-> | **Inference / Evaluation** | `"torch"` or `"flashattn"` | Required for inference. `"flex"` will cause errors at eval time. |
->
-> **How to change:** Open `<your-model-path>/transformer/config.json`, find the `"attn_mode"` field, and set it to the appropriate value.
+# 公开 venv 装 imageio(qwen_stage_annotate.py 解码视频用)
+/inspire/qb-ilm2/project/26summer-camp-11/.venv/bin/pip install imageio imageio-ffmpeg Pillow
+
+# 验证基座 ckpt 4 子目录齐全
+ls -d $BS/{vae,tokenizer,text_encoder,transformer}
+```
 
 ---
 
-## Deploying LingBot-VA for Inference
-LingBot-VA supports both standalone execution and Server-Client architecture which separates the model environment from simulation. By isolating dependencies, the design avoids package clashes and supports distributed inference on GPUs, clusters, and other devices.
+## 2. 数据准备
 
-<!-- ### Standalone  Inference
+> 主数据集 12 任务已有 keyframes.jsonl + stages.jsonl(本项目已生成);
+> 若要**从零重做**,按下面两步。
+
+### 2.1 关键帧标注(Latent-CoT #1,M1/M1v/WRONG 都需要,~5 分钟)
+
+```bash
+python $REPO/evaluation/robotwin/keyframe_annotate.py \
+  --dataset $DS_MAIN \
+  --recursive --gripper-idx 7 15
+# 产出 12 个 meta/keyframes.jsonl
+```
+
+### 2.2 Phase B VLM 阶段标注(M1v/WRONG 需要,M1 不需要,~1 小时,**8 GPU 并行**)
+
+```bash
+LOG=$REPO/train_out
+mkdir -p "$LOG"
+
+# 起 8 个 serve_qwen(GPU 0–7,端口 8000–8007)
+for k in $(seq 0 7); do
+  CUDA_VISIBLE_DEVICES=$k PORT=$((8000+k)) nohup \
+    /inspire/qb-ilm2/project/26summer-camp-11/.venv/bin/python \
+    /inspire/qb-ilm2/project/26summer-camp-11/serve_qwen.py \
+    > "$LOG/serveqwen_gpu${k}.log" 2>&1 &
+  sleep 2
+done
+for k in $(seq 0 7); do
+  until grep -q "Application startup complete" "$LOG/serveqwen_gpu${k}.log" 2>/dev/null; do sleep 3; done
+  echo "server $k ready"
+done
+
+# 8 分片客户端
+for k in $(seq 0 7); do
+  nohup python $REPO/evaluation/robotwin/qwen_stage_annotate.py \
+    --dataset "$DS_MAIN" --recursive --frames 4 --max-tokens 256 --timeout 120 --resume \
+    --num-shards 8 --shard $k --base-url http://127.0.0.1:$((8000+k))/v1 \
+    > "$LOG/stage_shard${k}.log" 2>&1 &
+  sleep 1
+done
+tail -f "$LOG"/stage_shard*.log    # 等 pgrep -fa qwen_stage_annotate.py 空 = 全跑完
+
+# 收尾去重 + 关 8 server
+python - <<'PY'
+import json, glob, os
+DS="/inspire/qb-ilm2/project/26summer-camp-11/public/group3/lingbot-robotwin-clean-and-aug-lerobot/lerobot_robotwin_eef_aug_500_stable"
+for sj in sorted(glob.glob(os.path.join(DS,"*","meta","stages.jsonl"))):
+    raw=[json.loads(l) for l in open(sj) if l.strip()]
+    uniq={int(r["episode_index"]): r for r in raw}
+    n_ep=sum(1 for _ in open(os.path.join(os.path.dirname(sj),"episodes.jsonl")))
+    with open(sj,"w") as f:
+        for ei in sorted(uniq): f.write(json.dumps(uniq[ei])+"\n")
+    print(f"{os.path.basename(os.path.dirname(os.path.dirname(sj))):55s} {len(raw)} -> {len(uniq)} / {n_ep}")
+PY
+pkill -f serve_qwen.py
+```
+
+**期望**:12 任务每个 `500 -> 500 / 500`,无缺失。
+
+---
+
+## 3. 训练(3 个 ckpt:M1 / M1v / M1v_WRONG)
+
+> 详见 `H200_TRAINING.md`。每个 ~2 小时到 step 1200(`save_interval=200`),
+> **按一次 Ctrl-C 安全存档退出**。三个串行 ≈ 6 小时。
+
+### 3.1 M1(baseline,仅 kf 辅助头)
+
+先在 `wan_va/configs/va_robotwin_train_cfg.py` 临时关闭 vlm_stage_aux:
 ```python
-python inference.py
+va_robotwin_train_cfg.vlm_stage_aux    = False
+va_robotwin_train_cfg.vlm_stage_weight = 0.0
 ```
-This processes the example data from `examples/0/` and saves visualizations to `result/`. -->
-
-### Evaluation on RoboTwin-2.0
-
-**Preparing the Environment**
-
-You can follow the official instructions from the original RoboTwin-2.0 repository:  
-[https://robotwin-platform.github.io/doc/usage/robotwin-install.html](https://robotwin-platform.github.io/doc/usage/robotwin-install.html)
-
-
-In summary:
-
-1. Install Vulkan dependencies:
-   ```bash
-   sudo apt install libvulkan1 mesa-vulkan-drivers vulkan-tools
-   ```
-
-2. Clone the RoboTwin repository:
-   ```bash
-   git clone https://github.com/RoboTwin-Platform/RoboTwin.git && cd RoboTwin && git checkout 2eeec322
-   ```
-
-3. Modify `script/requirements.txt` with the following content:
-   ```txt
-   transforms3d==0.4.2
-   sapien==3.0.0b1
-   scipy==1.10.1
-   mplib==0.2.1
-   gymnasium==0.29.1
-   trimesh==4.4.3
-   open3d==0.18.0
-   imageio==2.34.2
-   pydantic
-   zarr
-   openai
-   huggingface_hub==0.36.2
-   h5py
-   # For Description Generation
-   azure==4.0.0
-   azure-ai-inference
-   pyglet<2
-   wandb
-   moviepy
-   imageio
-   termcolor
-   av
-   matplotlib
-   ffmpeg
-   ```
-
-4. Modify line 8 of `script/_install.sh`:
-   ```bash
-   pip install "git+https://github.com/facebookresearch/pytorch3d.git@stable" --no-build-isolation
-   ```
-
-5. Install dependencies:
-   ```bash
-   bash script/_install.sh
-   ```
-
-6. Download assets:
-   ```bash
-   bash script/_download_assets.sh
-   ```
-
- **Deploying the Inference Server**
+然后:
 ```bash
-# single GPU
-bash evaluation/robotwin/launch_server.sh
-
-# multi-GPU
-bash evaluation/robotwin/launch_server_multigpus.sh
+cd $REPO && \
+NGPU=8 CONFIG_NAME=robotwin_train CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+MASTER_PORT=29533 \
+  bash script/run_va_posttrain.sh
+# 期望: latent_loss ~0.12, action_loss ~1e-3, kf_loss ~2e-3 (stage_loss=0,被关掉)
+# Ctrl-C → train_out/checkpoints/robotwin_kf0.1/checkpoint_step_1200/
+# (注:本项目历史命名为 checkpoint_step_1200 直接放 train_out/checkpoints/)
 ```
+事后**改回 `vlm_stage_aux=True`**(给 M1v 用)。
 
- **Executing the Inference Client**
+### 3.2 M1v(主交付,kf + VLM 阶段双辅助头)
+
+确认配置默认开启 kf_aux + vlm_stage_aux,然后:
 ```bash
-# single GPU
-task_name="adjust_bottle";
-save_root="results/";
-bash evaluation/robotwin/launch_client.sh ${save_root} ${task_name}
-
-# multi-GPU
-save_root="results/"
-task_group_id=0;
-bash evaluation/robotwin/launch_client_multigpus.sh ${save_root} ${task_group_id}
+cd $REPO && \
+NGPU=8 CONFIG_NAME=robotwin_train CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+MASTER_PORT=29534 \
+  bash script/run_va_posttrain.sh
+# 期望: 四 loss 同时下降, stage_loss 收敛 ~0.03 (vs chance 0.208)
+# Ctrl-C → train_out/checkpoints/robotwin_kf0.1_vlmstage0.1/checkpoint_step_1200/
 ```
 
-Related experiments results will be save in `/path/to/your/RoboTwin/${save_root}`. Please note that an `eval_result` folder is also generated. This is a native output from RoboTwin and is identical to the contents in the results folder; it can be safely ignored.
-It is important to note that the inference server and client must be deployed on the same machine. For launching multi-GPU client, we padded the original 50 tasks to 56 via duplication and partitioned them into 7 groups to align with the 8-GPU configuration of our inference node. You can specify the `task_group_id` (0-6) to select a particular group for inference. For detailed grouping configurations, please refer to `evaluation/robotwin/launch_client_multigpus.sh`.
+### 3.3 M1v_WRONG(Ablation-3,kf + 错误 VLM 阶段)
 
-> **GPU Memory Requirements**: Approximately **24GB VRAM** for single-GPU RoboTwin evaluation with offload mode enabled (VAE and text_encoder offloaded to CPU).
-
-
-### Evaluation on LIBERO
-Follow the official instructions to install LIBERO, then launch the server and client:
-
-
+用专用配置 `robotwin_train_wrongstage`(`vlm_stage_corrupt='shuffle'`):
 ```bash
-# server
-bash evaluation/libero/launch_server.sh
-
-# client
-bash evaluation/libero/launch_client.sh
+cd $REPO && \
+NGPU=8 CONFIG_NAME=robotwin_train_wrongstage CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+MASTER_PORT=29535 \
+  bash script/run_va_posttrain.sh
+# 关键期望: stage_loss **完全卡在 ~0.208** (chance 0.1×ln 8) 不下降 (= Ablation 起效)
+# kf_loss 正常下降到 ~2e-3 (kf 信号完好,只 VLM 阶段被毁)
+# 等 step 200 或 1200 → Ctrl-C → train_out/checkpoints/robotwin_kf0.1_vlmstage0.1_WRONG/checkpoint_step_<N>/
 ```
-
-### Run Image to Video-Action Generation
-
-We also provide a script for image to video-action generation:
-
-```bash
-NGPU=1 CONFIG_NAME='robotwin_i2av' bash script/run_launch_va_server_sync.sh
-```
-
-> **GPU Memory Requirements**: Approximately **18GB VRAM** for single-GPU i2av inference with offload mode enabled (VAE and text_encoder offloaded to CPU).
-
-
-## Post-Training LingBot-VA
-
-We support post-training (fine-tuning) LingBot-VA on custom robotic manipulation datasets. The training pipeline uses FSDP for distributed training and integrates with [LeRobot](https://github.com/huggingface/lerobot) dataset format.
-
-### Additional Dependencies
-
-On top of the base installation, post-training requires:
-
-```bash
-pip install lerobot==0.3.3 scipy wandb --no-deps
-```
-
-### Data Preparation
-
-Download the post-training dataset from HuggingFace:
-
-```bash
-huggingface-cli download --repo-type dataset robbyant/robotwin-clean-and-aug-lerobot --local-dir /path/to/your/dataset
-```
-
-### Custom Dataset Preparation
-
-If you want to fine-tune LingBot-VA on your own robotic manipulation data, follow these steps:
-
-#### Example Dataset
-
-We provide a converted example dataset based on data from [Issue #29](https://github.com/Robbyant/lingbot-va/issues/29). This dataset has been converted into the expected format and is fully supported for training. You can download it to understand the required data structure:
-
-- **Download**: [Example Dataset](https://drive.google.com/file/d/1D52nK4ZOJmWBXKv1nWrLb9YBwq8nKa_b/view?usp=sharing)
-
-This example can serve as a reference for converting your own robotic manipulation data into the proper format.
-
-#### Data Pipeline Overview
-
-When preparing your custom dataset, the data goes through the following processing pipeline:
-
-1. **Raw Data** → Convert to LeRobot format (with metadata and video files)
-2. **Add Action Segmentation** → Add `action_config` to `episodes.jsonl`
-3. **Extract Latents** → Process videos through VAE according to video specifications
-4. **Dataset Loading** → Load processed data with proper action dimensions for training
-
-The final data should conform to these specifications:
-
-**Action Format:**
-- Output dimension: **30 dimensions**, structured as follows:
-  - Left arm EEF (end-effector): 7 dimensions
-  - Right arm EEF (end-effector): 7 dimensions
-  - Left arm joints: 7 dimensions
-  - Right arm joints: 7 dimensions
-  - Left arm gripper: 1 dimension
-  - Right arm gripper: 1 dimension
-- In your dataset class loader, map your robot's action dimensions to this standard 30-dimensional format. Missing dimensions are padded with **0**.
-
-**Video Format:**
-- During VAE latent extraction, resize videos to **~256 × 256 pixels** and downsample to **5-15 fps** as a reference (adjust based on your task requirements).
-
-#### Implementation Steps
-
-**Step 1: Convert your data to LeRobot format**
-
-Follow the official [LeRobot dataset documentation](https://github.com/huggingface/lerobot/tree/v0.3.3) to convert your raw data (e.g., HDF5, video files, etc.) into the standard LeRobot dataset format. Ensure that each episode contains the required observation videos, actions, and metadata.
-
-**Step 2: Add `action_config` field to `episodes.jsonl`**
-
-After converting to LeRobot format, you need to modify the `meta/episodes.jsonl` file to add an `action_config` field to each line. This field describes the temporal segmentation and natural language description of the robot's actions within each episode.
-
-Each line in `episodes.jsonl` should follow this format:
-
-```json
-{
-  "episode_index": 0,
-  "tasks": ["task description"],
-  "length": 450,
-  "action_config": [
-    {
-      "start_frame": 0,
-      "end_frame": 450,
-      "action_text": "Natural language description of the robot action in this segment.",
-    }
-  ]
-}
-```
-
-- `start_frame` / `end_frame`: The frame range (0-indexed) of the action segment within the episode.
-- `action_text`: A natural language description of what the robot does in this segment.
-
-For episodes with a single continuous action, `start_frame` should be `0` and `end_frame` should equal the episode `length`. You can also define multiple segments per episode if your data contains sequential sub-tasks.
-
-**Step 3: Extract video latents with Wan2.2 VAE**
-
-LingBot-VA operates on video latent representations rather than raw pixels. You need to extract the latent features using the Wan2.2 VAE encoder and place them under the converted LeRobot dataset directory. Please refer to the [Wan-Video documentation](https://github.com/Wan-Video) for instructions on how to run the VAE encoder.
-
-The extracted latent files should be placed under `latents/` in your dataset directory, mirroring the structure of `videos/`:
-
-```
-your_dataset/
-├── videos/
-│   └── chunk-000/
-│       └── observation.images.cam_high/
-│           ├── episode_000000.mp4
-│           └── ...
-├── latents/
-│   └── chunk-000/
-│       └── observation.images.cam_high/
-│           ├── episode_000000_0_450.pth    # named as episode_{index}_{start_frame}_{end_frame}.pth
-│           └── ...
-└── meta/
-    └── episodes.jsonl
-```
-
-Each `.pth` file is a dictionary containing the following fields:
-
-| Key | Type | Description |
-| :--- | :--- | :--- |
-| `latent` | `Tensor [N, C]` (bfloat16) | Flattened VAE latent features (e.g., shape `[latent_num_frames * latent_height * latent_width, C]`) |
-| `latent_num_frames` | `int` | Number of temporal frames in the latent space |
-| `latent_height` | `int` | Spatial height in the latent space |
-| `latent_width` | `int` | Spatial width in the latent space |
-| `video_num_frames` | `int` | Number of frames in the (sampled) source video |
-| `video_height` | `int` | Original video height in pixels |
-| `video_width` | `int` | Original video width in pixels |
-| `text_emb` | `Tensor [L, D]` (bfloat16) | Text embedding of the action description (encoded by Wan2.2 text encoder) |
-| `text` | `str` | The raw action description text |
-| `frame_ids` | `list[int]` | Sampled frame indices from the original episode (at target fps) |
-| `start_frame` | `int` | Start frame index matching `action_config` in `episodes.jsonl` |
-| `end_frame` | `int` | End frame index matching `action_config` in `episodes.jsonl` |
-| `fps` | `int` | Target sampling fps used for latent extraction |
-| `ori_fps` | `int` | Original fps of the episode data |
-
-The latent file naming convention `episode_{index}_{start_frame}_{end_frame}.pth` corresponds to the `action_config` segments defined in `episodes.jsonl`. For example, an episode with `"start_frame": 0, "end_frame": 450` produces a latent file named `episode_000000_0_450.pth`.
-
-### Training
-
-```bash
-# RoboTwin
-NGPU=8 CONFIG_NAME='robotwin_train' bash script/run_va_posttrain.sh
-
-# LIBERO
-NGPU=8 CONFIG_NAME='libero_train' bash script/run_va_posttrain.sh
-```
-
-For better training performance, use a larger global batch size (e.g., 32, 64). If you have limited GPU resources, you can increase `gradient_accumulation_steps` to achieve a larger effective batch size.
-
 
 ---
 
-# 📊 Performance
+## 4. 推理日志(模型参数 + 计算开销自动打印)
 
-We evaluate our model on both simulation benchmarks and real-world scenarios, and achieve state-of-the-art performance.
+**所有 server 启动时都会自动打**一份"模型规模 + 计算开销"报表(从 safetensors
+metadata 算,~100ms,不加载权重)。两条路径:
 
-## Simulation Evaluation
+| Server 实现 | 谁打? |
+|---|---|
+| 主仓库 `wan_va/wan_va_server.py`(M0 用 / `launch_server.sh`)| `_log_param_counts` 在 `__init__` 内 inline 打 |
+| EVAL_ENV `wan_va_server_predvideo.py`(M1/M1v dream_video,**EVAL_ENV 源码不动**)| 我们 wrapper `script/launch_server_pred_latent.sh` 在 cd EVAL_ENV 之前 pre-flight 调 `script/print_model_params.py` |
 
-- **RoboTwin 2.0**
-
-We are the first to propel RoboTwin 2.0 metrics performance past the 90+ threshold！
-<table style="border-collapse: collapse; width: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; font-size: 13px; line-height: 1.2;">
-<!-- 指标说明 -->
-  <p style="font-size: 12px; color: #666; margin-bottom: 5px;">* All metrics are reported in percentage (%). Higher values are <b>bolded</b>.</p>
-  <thead>
-    <tr style="border-top: 2px solid black; border-bottom: 1px solid black;">
-      <th align="left" style="padding: 6px 12px; white-space: nowrap;">Method (Average 50 Tasks)</th>
-      <th align="center" style="padding: 6px 12px;">Easy SR (%)</th>
-      <th align="center" style="padding: 6px 12px;">Hard SR (%)</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td style="padding: 4px 12px; white-space: nowrap;">X-VLA</td>
-      <td align="center">72.9</td>
-      <td align="center">72.8</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 12px; white-space: nowrap;">&pi;<sub>0</sub></td>
-      <td align="center">65.9</td>
-      <td align="center">58.4</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 12px; white-space: nowrap;">&pi;<sub>0.5</sub></td>
-      <td align="center">82.7</td>
-      <td align="center">76.8</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 12px; white-space: nowrap;">Motus</td>
-      <td align="center"><u>88.7</u></td>
-      <td align="center"><u>87.0</u></td>
-    </tr>
-    <tr style="border-top: 1px solid black; border-bottom: 2px solid black;">
-      <td style="padding: 6px 12px; white-space: nowrap;"><b>LingBot-VA (Ours)</b></td>
-      <td align="center"><b>92.9</b> <small>(+4.2)</small></td>
-      <td align="center"><b>91.6</b> <small>(+4.6)</small></td>
-    </tr>
-  </tbody>
-</table>
-
-
-- **LIBERO**
-
-<table style="border-collapse: collapse; width: auto; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; font-size: 13px; line-height: 1.2;">
-<!-- 指标说明 -->
-  <p style="font-size: 12px; color: #666; margin-bottom: 5px;">* All metrics are reported in percentage (%). Higher values are <b>bolded</b>.</p>
-  <thead>
-    <tr style="border-top: 2px solid black; border-bottom: 1px solid black;">
-      <th align="left" style="padding: 6px 10px; border-right: 1px solid black; white-space: nowrap;">Methods</th>
-      <th align="center" style="padding: 6px 8px;">Spatial</th>
-      <th align="center" style="padding: 6px 8px;">Object</th>
-      <th align="center" style="padding: 6px 8px;">Goal</th>
-      <th align="center" style="padding: 6px 8px;">Long</th>
-      <th align="center" style="padding: 6px 8px;">Avg</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td style="padding: 4px 10px; border-right: 1px solid black; white-space: nowrap;">&pi;<sub>0</sub></td>
-      <td align="center">96.8</td><td align="center">98.8</td><td align="center">95.8</td><td align="center">85.2</td><td align="center">94.1</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 10px; border-right: 1px solid black; white-space: nowrap;">&pi;<sub>0.5</sub></td>
-      <td align="center">98.8</td><td align="center">98.2</td><td align="center">98.0</td><td align="center">92.4</td><td align="center">96.9</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 10px; border-right: 1px solid black; white-space: nowrap;">OpenVLA</td>
-      <td align="center">84.7</td><td align="center">88.4</td><td align="center">79.2</td><td align="center">53.7</td><td align="center">76.5</td>
-    </tr>
-    <tr>
-      <td style="padding: 4px 10px; border-right: 1px solid black; white-space: nowrap;">X-VLA</td>
-      <td align="center">98.2</td><td align="center">98.6</td><td align="center">97.8</td><td align="center">97.6</td><td align="center">98.1</td>
-    </tr>
-    <tr style="border-top: 1.5px solid black; border-bottom: 2px solid black;">
-      <td style="padding: 5px 10px; border-right: 1px solid black; white-space: nowrap;"><b>LingBot-VA (Ours)</b></td>
-      <td align="center"><b>98.5 &plusmn; 0.3</b></td>
-      <td align="center"><b>99.6 &plusmn; 0.3</b></td>
-      <td align="center"><b>97.2 &plusmn; 0.2</b></td>
-      <td align="center"><b>98.5 &plusmn; 0.5</b></td>
-      <td align="center"><b>98.5</b></td>
-    </tr>
-  </tbody>
-</table>
-
-
-
-&nbsp;
-
-## Real-world Deployment
-
-Six manipulation tasks across three categories: longhorizon tasks (Make Breakfast, Pick Screws), precision tasks (Insert Tube, Unpack Delivery), and deformable & articulated object
-manipulation (Fold Clothes, Fold Pants). Our method achieves state-of-the-art performance on both metrics (Progress Rate and Success Rate) with <b>only 50 trials</b> per task, substantially outperforming strong baseline &pi;<sub>0.5</sub>.
-
-<div style="text-align: left; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; line-height: 1.6;">
-
-  <!-- 第一部分：PS 说明 -->
-  <div style="margin-bottom: 5px;"><strong>Progress Score (PS):</strong> The average score across all trials divided by the maximum possible score, expressed as a percentage:</div>
-
-  PS = Average_Progress / Max_Steps &times; 100%
-
-  <!-- 第二部分：SR 说明 -->
-  <div style="margin-bottom: 5px;"><strong>Success Rate (SR):</strong> The number of successful trials divided by the total number of trials, expressed as a percentage:</div>
-
-  SR = Successful_Trials / N &times; 100%
-
-</div>
-
-
-
-<div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;">
-  <!-- 指标说明 -->
-  <p style="font-size: 12px; color: #666; margin-bottom: 5px;">* All metrics are reported in percentage (%). Higher values are <b>bolded</b>.</p>
-  
-  <table style="border-collapse: collapse; width: auto; font-size: 13px; line-height: 1.2;">
-    <thead>
-      <tr style="border-top: 2px solid black;">
-        <th rowspan="2" align="left" style="padding: 4px 10px; border-bottom: 1px solid black; white-space: nowrap;"><b>Task</b></th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Make Breakfast</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Pick Screws</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Insert Tube</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Unpack Delivery</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Fold Clothes</th>
-        <th colspan="2" style="padding: 4px 10px; border-bottom: 1px solid black;">Fold Pants</th>
-      </tr>
-      <tr style="border-bottom: 1px solid black;">
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-        <th style="padding: 4px 8px;">PS</th>
-        <th style="padding: 4px 8px;">SR</th>
-      </tr>
-    </thead>
-    <tbody>
-      <tr>
-        <td style="padding: 6px 10px; white-space: nowrap;">&pi;<sub>0.5</sub></td>
-        <td align="center">73.0</td><td align="center">70.0</td>
-        <td align="center">74.0</td><td align="center">50.0</td>
-        <td align="center">79.2</td><td align="center">30.0</td>
-        <td align="center">73.0</td><td align="center">25.0</td>
-        <td align="center"><b>62.9</b></td><td align="center">30.0</td>
-        <td align="center">30.0</td><td align="center">30.0</td>
-      </tr>
-      <tr style="border-bottom: 2px solid black;">
-        <td style="padding: 6px 10px; white-space: nowrap;"><b>LingBot-VA (Ours)</b></td>
-        <td align="center"><b>97.0</b></td><td align="center"><b>75.0</b></td>
-        <td align="center"><b>82.5</b></td><td align="center"><b>70.0</b></td>
-        <td align="center"><b>85.8</b></td><td align="center"><b>40.0</b></td>
-        <td align="center"><b>84.5</b></td><td align="center"><b>65.0</b></td>
-        <td align="center">48.8</td><td align="center"><b>35.0</b></td>
-        <td align="center"><b>76.7</b></td><td align="center"><b>70.0</b></td>
-      </tr>
-    </tbody>
-  </table>
-</div>
-
-
-# 🪪 License
-
-This project is released under the Apache License 2.0. See [LICENSE](LICENSE.txt) file for details.
-
-# 📚Citation
-
-```bibtex
-@article{lingbot-va2026,
-  title={Causal World Modeling for Robot Control},
-  author={Li, Lin and Zhang, Qihang and Luo, Yiming and Yang, Shuai and Wang, Ruilin and Han, Fei and Yu, Mingrui and Gao, Zelin and Xue, Nan and Zhu, Xing and Shen, Yujun and Xu, Yinghao},
-  journal={arXiv preprint arXiv:2601.21998},
-  year={2026}
-}
+两条路径输出**完全一致**:
+```
+================  Model Parameter Counts  ================
+  TAG  : M1v
+  ckpt : /inspire/hdd/.../checkpoints/robotwin_kf0.1_vlmstage0.1/checkpoint_step_1200
+  Wan2.2 VAE                : 247.0 M   (   247,000,000)   [1 file(s)]
+  UMT5 Text Encoder         :  5.50 B   ( 5,500,000,000)   [2 file(s)]
+  Transformer backbone      :  1.80 B   ( 1,799,212,279)
+  + kf_aux_head (Latent #1) : 393.3 K   (       393,345)
+  + stage_head  (Phase B)   : 394.4 K   (       394,376)
+  ──────────────────────────────────────────────────────────
+  Transformer (subtotal)    :  1.80 B   ( 1,800,000,000)   [1 file(s)]
+  TOTAL (VAE + UMT5 + Xfmr) :  7.55 B   ( 7,547,000,000)
+==========================================================
+================  Compute Cost (estimates)  ==============
+  Memory footprint(仅权重,不含 KV cache / activations / 梯度):
+    bf16/fp16 (inference): VAE 471 MB | UMT5 10.24 GB | Xfmr 3.35 GB | TOTAL 14.06 GB
+    fp32      (training) : VAE 942 MB | UMT5 20.49 GB | Xfmr 6.71 GB | TOTAL 28.11 GB
+  Forward FLOPs(Kaplan ≈ 6 × P × N_tokens):
+    Transformer / token                : 10.80 GFLOPs
+    Transformer / forward (~1500 tok)  : 16.20 TFLOPs
+    Transformer / episode (~100 chunk) :  1.62 PFLOPs
+==========================================================
 ```
 
-# 🧩 Acknowledgments
-
-This work builds upon several excellent open-source projects:
-
-- [Wan-Video](https://github.com/Wan-Video) - Vision transformer backbone
-- [MoT](https://github.com/facebookresearch/Mixture-of-Transformers) - Mixture-of-Transformers architecture
-- The broader open-source computer vision and robotics communities
+**手动单跑**(任何 ckpt,无 server,~100 ms):
+```bash
+python $REPO/script/print_model_params.py --ckpt $M1V_CKPT --tag M1v
+python $REPO/script/print_model_params.py --ckpt $M1_CKPT  --tag M1
+python $REPO/script/print_model_params.py --ckpt $BS       --tag stock
+```
 
 ---
 
-For questions, discussions, or collaborations:
+## 5. 在线 RoboTwin 评测(4090 实例,~3 小时全跑)
 
-- **Issues**: Open an [issue](https://github.com/robbyant/lingbot-va/issues) on GitHub
-- **Email**: Contact Dr. [Qihang Zhang](https://zqh0253.github.io/) (liuhuan.zqh@antgroup.com) or Dr. [Lin Li](https://lilin-hitcrt.github.io/) (fengchang.ll@antgroup.com) 
+详 `H200_TRAINING.md` 不涵盖,见此处。两套路径:
+
+### 5.1 两步式手动(最稳,推荐)
+
+**终端 1 — M1 server**:
+```bash
+TAG=M1 bash $REPO/script/launch_server_pred_latent.sh
+# 等 "Model Parameter Counts" + "server listening on 0.0.0.0:29056" 出现 → 就绪
+```
+
+**终端 2 — M1 client 6 任务循环**:
+```bash
+for t in handover_block handover_mic hanging_mug blocks_ranking_size beat_block_hammer lift_pot; do
+  TAG=M1 TASK=$t TEST_NUM=10 PORT=29056 \
+    bash $REPO/script/launch_client_latent.sh
+done
+```
+跑完 → 终端 1 按一次 `Ctrl-C` 关 server。
+
+**M1v(换端口)**:
+```bash
+# 终端 1
+TAG=M1v START_PORT=29066 MASTER_PORT=29071 \
+  bash $REPO/script/launch_server_pred_latent.sh
+# 终端 2 (PORT 同步换)
+for t in handover_block handover_mic hanging_mug blocks_ranking_size beat_block_hammer lift_pot; do
+  TAG=M1v TASK=$t TEST_NUM=10 PORT=29066 \
+    bash $REPO/script/launch_client_latent.sh
+done
+```
+
+### 5.2 一键编排(自动两个 ckpt × 6 任务)
+
+```bash
+TEST_NUM=10 bash $REPO/script/eval_route2_latent_cot.sh
+# 末尾自动打 SR 对照表 + JSON
+```
+
+### 5.3 SR 汇总
+
+```bash
+ROBOTWIN=/inspire/qb-ilm2/project/26summer-camp-11/public/group3/RoboTwin
+python - <<'PY'
+import os, glob, json
+ROBOTWIN = "/inspire/qb-ilm2/project/26summer-camp-11/public/group3/RoboTwin"
+TAGS  = ["M1", "M1v"]
+TASKS = "handover_block handover_mic hanging_mug blocks_ranking_size beat_block_hammer lift_pot".split()
+rows = {tag: {} for tag in TAGS}
+for tag in TAGS:
+    for t in TASKS:
+        fs = sorted(glob.glob(os.path.join(ROBOTWIN, "eval_result", t, "ACT",
+                                           "demo_clean", tag, "*", "_result.txt")))
+        if not fs: rows[tag][t] = None; continue
+        lines = [l.strip() for l in open(fs[-1]) if l.strip()]
+        rows[tag][t] = float(lines[-1]) if lines else None
+w=[26,10,12,12]; hdr=["Task","M1","M1v","Δ(M1v-M1)"]
+print("| " + " | ".join(f"{h:<{w[i]}s}" for i,h in enumerate(hdr)) + " |")
+print("|" + "|".join("-"*(c+2) for c in w) + "|")
+for t in TASKS:
+    m1, m1v = rows["M1"].get(t), rows["M1v"].get(t)
+    s1="--" if m1 is None else f"{m1:.3f}"; s2="--" if m1v is None else f"{m1v:.3f}"
+    d="--" if (m1 is None or m1v is None) else f"{m1v-m1:+.3f}"
+    print("| " + " | ".join(f"{c:<{w[i]}s}" for i,c in enumerate([t,s1,s2,d])) + " |")
+PY
+```
+
+---
+
+## 6. 离线探针消融(§6 必做消融)
+
+> Latent-CoT #4 冻结-backbone 线性探针。两步:① collect h_t dump(慢,GPU)
+> → ② 跑线性探针(快,CPU,确定性)。
+
+### 6.1 Collect h_t dump(对每个 ckpt 跑一次,~5 min/个)
+
+```bash
+cd $REPO
+
+# stock(无 CoT 基座)
+NGPU=1 CONFIG_NAME=robotwin_train CUDA_VISIBLE_DEVICES=0 MASTER_PORT=29540 \
+  bash script/run_va_posttrain.sh \
+  --probe-ckpt $BS \
+  --probe-collect ./train_out/probe/h_stock.pt --probe-collect-batches 200
+
+# M1 (kf-only)
+NGPU=1 CONFIG_NAME=robotwin_train CUDA_VISIBLE_DEVICES=0 MASTER_PORT=29541 \
+  bash script/run_va_posttrain.sh \
+  --probe-ckpt $M1_CKPT \
+  --probe-collect ./train_out/probe/h_kf.pt --probe-collect-batches 200
+
+# M1v (kf + VLM)
+NGPU=1 CONFIG_NAME=robotwin_train CUDA_VISIBLE_DEVICES=0 MASTER_PORT=29542 \
+  bash script/run_va_posttrain.sh \
+  --probe-ckpt $M1V_CKPT \
+  --probe-collect ./train_out/probe/h_kfvlm.pt --probe-collect-batches 200
+
+# M1v_WRONG (Ablation-3)
+NGPU=1 CONFIG_NAME=robotwin_train CUDA_VISIBLE_DEVICES=0 MASTER_PORT=29543 \
+  bash script/run_va_posttrain.sh \
+  --probe-ckpt $M1V_WRONG_CKPT \
+  --probe-collect ./train_out/probe/h_wrongstage.pt --probe-collect-batches 200
+```
+
+### 6.2 跑探针(任何机器,无 GPU,~1 min)
+
+```bash
+for tag in h_stock h_kf h_kfvlm h_wrongstage; do
+  python $REPO/evaluation/robotwin/latent_probe.py --config robotwin_train \
+    --features h_hidden --label vlm_stage \
+    --hidden-dump $REPO/train_out/probe/$tag.pt \
+    --out-dir $REPO/train_out/probe/out_$tag \
+    --seed 0
+done
+```
+
+### 6.3 冻结 canonical + 复现校验
+
+```bash
+bash $REPO/script/freeze_probe.sh        # 把 sha256+expected 写 probe_canonical.json
+bash $REPO/script/reproduce_probe.sh     # 4/4 PASS Δ=+0.000 = 全对
+```
+
+**期望数字**(seed=0,canonical):
+| ckpt | val_acc | 与 stock 差 |
+|---|---|---|
+| stock | 0.652 | 0 |
+| kf (M1) | 0.648 | −0.004 |
+| **kf+VLM (M1v)** | **0.778** | **+0.126** |
+| wrongstage | 0.638 | −0.014(错误监督有害) |
+
+---
+
+## 7. 三项正式消融(PDF 必做)
+
+### 7.1 Ablation-1 + 2:显式 CoT(4090,无需重训,~3 h)
+
+```bash
+TEST_NUM=10 bash $REPO/script/run_ablation_explicit.sh
+# 一个 M1 server + 6 任务 × 3 档客户端 (cot_full / no_cot / shuffle_subtasks)
+# VLM 自动接 Qwen3-VL-4B-Instruct 公网端点
+# 末尾自动出 ΔA1 / ΔA2 对照表 + train_out/ablation_explicit/ablation_explicit_summary.json
+```
+
+### 7.2 Ablation-3:错误标记(隐式,H200 重训 + 4090 评测,~5 h)
+
+```bash
+# Phase TRAIN (H200, ~2 h 到 step 1200)
+PHASE=train bash $REPO/script/run_ablation_implicit.sh
+# Ctrl-C 后存到 train_out/checkpoints/robotwin_kf0.1_vlmstage0.1_WRONG/
+
+# Phase PROBE (任何机, ~15 min)
+PHASE=probe bash $REPO/script/run_ablation_implicit.sh
+# 末尾自动打 4 ckpt 对照表 (stock/kf/kfvlm/wrongstage)
+
+# Phase EVAL (4090, ~1.5 h)
+PHASE=eval bash $REPO/script/run_ablation_implicit.sh
+```
+
+---
+
+## 8. VLM 过程性评判(可选,4090)
+
+VLM 看真实 rollout 视频逐子目标打 0–1 分(env SR 二值之外的过程性评估):
+
+```bash
+# 一次性装依赖
+pip install openai httpx imageio imageio-ffmpeg Pillow numpy
+
+# 全量(~15-30 min)
+python $REPO/evaluation/robotwin/judge_completion.py \
+  --log-root /inspire/qb-ilm2/project/26summer-camp-11/public/group3/RoboTwin/outputs_infonce/log \
+  --frames 8 --resume
+
+# 查看汇总
+cat /inspire/qb-ilm2/project/26summer-camp-11/public/group3/RoboTwin/outputs_infonce/log/judge/summary.json
+```
+
+---
+
+## 9. 产物位置一览
+
+| 类型 | 位置 |
+|---|---|
+| 训练 ckpt(M1) | `$REPO/train_out/checkpoints/checkpoint_step_1200/transformer/` |
+| 训练 ckpt(M1v) | `$REPO/train_out/checkpoints/robotwin_kf0.1_vlmstage0.1/checkpoint_step_1200/transformer/` |
+| 训练 ckpt(M1v_WRONG) | `$REPO/train_out/checkpoints/robotwin_kf0.1_vlmstage0.1_WRONG/checkpoint_step_<N>/transformer/` |
+| 训练 ckpt 元信息 | 同上目录的 `meta.json`(自描述 exp_tag/base/λ/timestamp 等) |
+| wandb 离线日志 | `$REPO/train_out/wandb/wandb/offline-run-*` |
+| 探针 dump (~140 MB) | `$REPO/train_out/probe/h_{stock,kf,kfvlm,wrongstage}.pt` |
+| 探针结果 + t-SNE | `$REPO/train_out/probe/out_h_<tag>/{results,probe,tsne}_*.{json,pt,png}` |
+| 探针 canonical | `$REPO/train_out/probe/probe_canonical.json` |
+| RoboTwin SR 文本 | `$ROBOTWIN/eval_result/<task>/ACT/demo_clean/<tag>/<ts>/_result.txt` |
+| RoboTwin sapien 视频 | `$ROBOTWIN/eval_result/<task>/ACT/demo_clean/<tag>/<ts>/episode*.mp4` |
+| dream_video(M1/M1v latent eval) | `$EVAL_ENV/visualization_predvideo_<tag>/` 和 `$ROBOTWIN/outputs_latent_<tag>/` |
+| 想象 vs 真实对比 | `$ROBOTWIN/results_latent_<tag>/stseed-*/visualization/<task>/*_True\|False.mp4` |
+| Ablation-1/2 SR 汇总 | `$REPO/train_out/ablation_explicit/ablation_explicit_summary.json` |
+| 完整探针归档(分发用) | `$REPO/train_out/archive/wam_cot_probe_full_<ts>.tgz` + `README_<ts>.md`(62 MB tarball) |
+
+---
+
+## 10. 最小复现路径(考官 1 分钟,无 GPU)
+
+只验证 §6 探针消融的全部数字 ——**任何机器,无 GPU,~1 分钟**:
+
+```bash
+# 1) 获取 archive tarball (~62 MB,共享盘 / 邮件 / 网盘任你选)
+wget <wherever you uploaded the tarball>   # 或:cp /inspire/.../archive/wam_cot_probe_full_<ts>.tgz .
+
+# 2) 解压
+TGT=/some/path
+mkdir -p $TGT
+tar xzf wam_cot_probe_full_*.tgz -C $TGT
+ls -R $TGT/probe   # 应见 h_*.pt × 4 + out_h_* × 4 + probe_canonical.json + reproduce_out/
+
+# 3) 装最小依赖(无 torch GPU,纯 CPU 即可)
+pip install numpy torch scikit-learn matplotlib safetensors
+
+# 4) clone 仓库 + 跑复现脚本
+git clone <项目 repo url>
+cd <repo>
+PROBE_DIR=$TGT/probe bash script/reproduce_probe.sh
+
+# 期望末尾输出:
+#   tag               val_acc expected        Δ    tol  status
+#   h_stock             0.652    0.652   +0.000  0.010  PASS
+#   h_kf                0.648    0.648   +0.000  0.010  PASS
+#   h_kfvlm             0.778    0.778   +0.000  0.010  PASS
+#   h_wrongstage        0.638    0.638   +0.000  0.010  PASS
+#   ==>  ALL PASS (within ±0.01)
+```
+
+**这就是 PDF "必做消融" 的硬证据**,字节级可复现,无需 GPU、无需 RoboTwin 仿真、无需重新训练。
+
+---
+
+## 11. 常见问题速查
+
+| 现象 | 原因 | 解决 |
+|---|---|---|
+| `EADDRINUSE port 29501/29061` | torchrun MASTER_PORT 残留 | `pkill -9 -f 'wan_va\.train\|torch\.distributed\.run'; sleep 3` 或换 `MASTER_PORT=29533` |
+| `Disk quota exceeded` 训到 step 80 崩 | `/inspire/hdd/.../26220077` 11G 满 | `§1.3 (a)` 软链 `train_out` 到 qb-ilm2;`run_va_posttrain.sh` 已设 HF cache 到大盘 |
+| `libcudnn_graph.so.9: undefined symbol cudnnGetLibConfig` SIGABRT | 系统 cuDNN 覆盖 torch 自带 | `run_va_posttrain.sh` 已内嵌 LD_PRELOAD 修复(全自动) |
+| `qwen_stage_annotate` 全 SKIP `No module named imageio` | 当前 venv 没装 imageio | `§1.3` 给公开 venv 装,或切 LingBot venv |
+| `Cannot copy out of meta tensor` | 新加 head 留 meta | `load_transformer` 已修(扫子模块 to_empty + reset_parameters) |
+| client `No module named eval_polict_client_openpi_latent` | 当前 cwd 不在 EVAL_ENV / 路径错 | 用 `script/launch_client_latent.sh` 自动 cd EVAL_ENV |
+| 4090 无 `ss` 命令 | iproute2 未装 | wrapper 已改用 bash 内建 `/dev/tcp/`(免 ss) |
+| `Ctrl-C` 训练后 ckpt 损坏 | 按了两次 Ctrl-C 硬杀 | **只按一次**,等日志显示 `Interrupt: saving checkpoint ... then exiting.` |
+| 探针跨次跑数字漂 ~0.02 | `_train_probe` nn.Linear init 未受 seed 控制 | `latent_probe.py` 已修(`torch.manual_seed(args.seed)`),`reproduce_probe.sh` 4/4 PASS Δ=+0.000 |
+
+---
+
+## 文档关系
+
+- `WAM_COT_README.md` — **项目交付主 README**(全面,1800+ 行)
+- `H200_TRAINING.md` — 训练专项快速参考
+- `EXPERIMENT_RESULTS.md` — 主 SR 表 + 探针消融完整结果
+- `MODEL_AND_DATA.md` — 模型架构 + 数据 + 损失数学详细推导
+- `TEAM_ROLES.md` — 团队分工
+- `latent_plan*.md` — 设计思路与进度
+- **本文档** — **复现说明**(从零起步全流程,只写命令)
+
+---
+
+## 一句话最后总结
+
+**最小复现**:`bash script/reproduce_probe.sh` ~1 分钟无 GPU 4/4 PASS。
+**评测复现**(4090,~3 h):`bash script/eval_route2_latent_cot.sh`。
+**完整复现**(H200+4090,~10 h):按 §2 → §3 → §5 → §6 → §7 顺序执行。
