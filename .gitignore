@@ -5,3 +5,6 @@ datasets/
 
 .venv/
 data_example/
+
+*.md
+!MODEL_AND_DATA.md

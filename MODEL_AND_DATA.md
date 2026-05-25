@@ -1,6 +1,5 @@
 # WAM-CoT（路线二·隐式物理 CoT）— 模型、改动与数据说明
 
-> 面向 26 夏令营技术报告。记录：用了什么基座模型、在其上改了什么/为什么改、
 > 用了什么数据集、数据来源。配套文档：只读规格 `latent_plan.md`、进度
 > `latent_plan_progress.md`、CoT 路线一 `evaluation/robocasa/COT_DESIGN.md`。
 
